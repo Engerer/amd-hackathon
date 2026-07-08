@@ -3,7 +3,7 @@ FROM python:3.11-slim
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    HF_HUB_ENABLE_HF_TRANSFER=1
+    HF_XET_HIGH_PERFORMANCE=1
 
 # Create working directory
 WORKDIR /app
@@ -17,12 +17,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install dependencies
 COPY requirements.txt .
-# Install hf_transfer for faster downloads
-RUN pip install --no-cache-dir -r requirements.txt hf_transfer
+# Install hf-xet for faster downloads
+RUN pip install --no-cache-dir -r requirements.txt hf-xet
 
 # Pre-download the GGUF model into the image
 RUN mkdir -p /models && \
-    huggingface-cli download Qwen/Qwen2.5-0.5B-Instruct-GGUF qwen2.5-0.5b-instruct-q4_k_m.gguf --local-dir /models --local-dir-use-symlinks False
+    hf download Qwen/Qwen2.5-0.5B-Instruct-GGUF qwen2.5-0.5b-instruct-q4_k_m.gguf --local-dir /models
 
 # Copy source code
 COPY main.py .
