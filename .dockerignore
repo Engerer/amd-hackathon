@@ -1,4 +1,5 @@
 .git
+.github
 .gitignore
 .venv
 __pycache__
@@ -14,6 +15,7 @@ db.sqlite3
 .DS_Store
 Dockerfile
 README.md
+test_agent.py
 tests/
 output/
 input/

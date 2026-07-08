@@ -1,47 +1,62 @@
-# AMD Developer Hackathon - Track 1: General-Purpose AI Agent
+# AMD Developer Hackathon - Track 1 Agent
 
-This codebase implements the Track 1 submission requirements for a general-purpose AI agent running on a 2 vCPU, 4GB RAM environment with a Docker image size under 10GB.
+This repository contains a Track 1 container entry for the AMD Developer Hackathon.
+It reads `/input/tasks.json`, sends every inference request through the Fireworks
+base URL supplied by the judging harness, and writes `/output/results.json`.
 
-## Features
+## Track 1 Compliance
 
-1. **Gemma 4 E2B Priority Selection**: Scans the dynamic `ALLOWED_MODELS` list at runtime and selects the best model, prioritizing Gemma 4 E2B models (e.g. `google/gemma-4-e2b-it`).
-2. **Category Classification**: Uses regex/rules to classify tasks on the fly, saving tokens and time compared to LLM-based classifiers.
-3. **Optimized Prompts**: Custom-tailored system prompts for all 8 categories (Factual knowledge, Mathematical reasoning, Sentiment classification, Text summarisation, Named entity recognition, Code debugging, Logical/deductive reasoning, Code generation).
-4. **Token Efficiency**: Strictly limits output tokens (`max_tokens`) per category to ensure optimal token efficiency scoring.
-5. **High Concurrency**: Processes requests asynchronously using a semaphore limit of 10 to complete execution well within the 10-minute constraint.
-6. **Graceful Failures**: Retries API calls with exponential backoff on transient errors.
+- Reads tasks from `/input/tasks.json` on startup.
+- Writes valid JSON results to `/output/results.json` before exiting.
+- Reads `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, and `ALLOWED_MODELS` only from
+  environment variables.
+- Sends all inference through the configured `FIREWORKS_BASE_URL`.
+- Calls only model IDs present in `ALLOWED_MODELS`.
+- Does not bundle or call local models.
+- Builds a small `linux/amd64` Docker image through GitHub Actions.
 
-## Project Structure
+## Local Contract Test
 
-- `main.py`: Entrypoint containing agent logic.
-- `requirements.txt`: Project dependencies (`openai`, `python-dotenv`).
-- `Dockerfile`: Multi-stage/slim Docker container configuration.
-- `test_agent.py`: Offline mock test harness.
-- `.dockerignore`: Excluded files for clean Docker builds.
+Install dependencies and run the mock Fireworks harness:
 
-## How to Test and Run
-
-### 1. Run Verification Tests Locally
-Run the offline test harness to verify correct parsing, API calls, and outputs:
 ```bash
+pip install -r requirements.txt
 python test_agent.py
 ```
-This starts a mock Fireworks server locally and processes mock tasks, generating `output/results.json`.
 
-### 2. Build the Docker Image
-To build the image locally:
+The test writes sample tasks, starts a local mock Fireworks API, runs `main.py`,
+and verifies that every task produced a non-empty answer through an allowed model.
+
+## Build Locally
+
 ```bash
-docker build -t amd-track1-agent .
+docker buildx build --platform linux/amd64 -t amd-track1-agent .
 ```
 
-### 3. Run the Docker Container
-Execute the container:
+## Run Locally
+
 ```bash
 docker run --rm \
-  -v /path/to/input:/input \
-  -v /path/to/output:/output \
-  -e FIREWORKS_API_KEY="your-api-key" \
+  -v /absolute/path/to/input:/input \
+  -v /absolute/path/to/output:/output \
+  -e FIREWORKS_API_KEY="provided-by-harness" \
   -e FIREWORKS_BASE_URL="https://api.fireworks.ai/inference/v1" \
-  -e ALLOWED_MODELS="google/gemma-4-e2b-it,other-model" \
+  -e ALLOWED_MODELS="model-a,model-b" \
   amd-track1-agent
+```
+
+## Publish
+
+The included GitHub Actions workflow publishes a `linux/amd64` image to GHCR on
+push to `main` or manual workflow dispatch:
+
+```text
+ghcr.io/engerer/amd-hackathon:latest
+```
+
+Before submitting, confirm the GHCR package is public and pullable:
+
+```bash
+docker pull ghcr.io/engerer/amd-hackathon:latest
+docker inspect ghcr.io/engerer/amd-hackathon:latest
 ```

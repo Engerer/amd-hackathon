@@ -1,4 +1,1 @@
-openai>=1.0.0
-python-dotenv>=1.0.0
-llama-cpp-python>=0.2.77
-huggingface-hub>=0.23.0
+openai>=1.35.0,<2

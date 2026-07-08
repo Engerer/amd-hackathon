@@ -4,156 +4,133 @@ import subprocess
 import sys
 import threading
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
-# Define a mock Fireworks API server
+
+CALLS = []
+ALLOWED_MODELS = [
+    "accounts/fireworks/models/llama-v3p3-70b-instruct",
+    "accounts/fireworks/models/qwen2p5-coder-32b-instruct",
+]
+
+
 class MockFireworksHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        # Suppress logging of HTTP requests to keep output clean
         return
 
     def do_POST(self):
-        if self.path == "/v1/chat/completions":
-            content_length = int(self.headers['Content-Length'])
-            post_data = self.rfile.read(content_length)
-            req_body = json.loads(post_data.decode('utf-8'))
-            
-            # Extract request details
-            messages = req_body.get("messages", [])
-            model = req_body.get("model", "")
-            
-            user_message = next((m["content"] for m in messages if m["role"] == "user"), "")
-            system_message = next((m["content"] for m in messages if m["role"] == "system"), "")
-            
-            # Generate a mock response
-            response_text = f"[Mock Response using model {model}] Received system prompt: '{system_message}' and user prompt: '{user_message}'"
-            
-            res_body = {
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": response_text
-                        },
-                        "finish_reason": "stop",
-                        "index": 0
-                    }
-                ]
-            }
-            
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(res_body).encode('utf-8'))
-        else:
+        if self.path != "/v1/chat/completions":
             self.send_response(404)
             self.end_headers()
+            return
 
-def run_mock_server(server_class=HTTPServer, handler_class=MockFireworksHandler, port=8000):
-    server_address = ('127.0.0.1', port)
-    httpd = server_class(server_address, handler_class)
-    httpd.serve_forever()
+        content_length = int(self.headers["Content-Length"])
+        request = json.loads(self.rfile.read(content_length).decode("utf-8"))
+        model = request.get("model")
+        messages = request.get("messages", [])
+        user_prompt = next((m.get("content", "") for m in messages if m.get("role") == "user"), "")
+
+        CALLS.append(request)
+
+        if model not in ALLOWED_MODELS:
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": {"message": "model not allowed"}}).encode("utf-8"))
+            return
+
+        body = {
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": f"mock answer for: {user_prompt[:80]}",
+                    },
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode("utf-8"))
+
+
+def run_mock_server(port):
+    server = ThreadingHTTPServer(("127.0.0.1", port), MockFireworksHandler)
+    server.serve_forever()
+
 
 def main():
-    # 1. Create mock inputs
-    os.makedirs("input", exist_ok=True)
-    os.makedirs("output", exist_ok=True)
-    
-    mock_tasks = [
-        {
-            "task_id": "t_factual",
-            "prompt": "What is the capital of France?"
-        },
-        {
-            "task_id": "t_math",
-            "prompt": "Calculate the sum of 15 and 27."
-        },
-        {
-            "task_id": "t_sentiment",
-            "prompt": "Classify the sentiment: I love this new product!"
-        },
-        {
-            "task_id": "t_summary",
-            "prompt": "Summarize this: The quick brown fox jumps over the lazy dog."
-        },
-        {
-            "task_id": "t_ner",
-            "prompt": "Extract person entities: John Doe went to Paris."
-        },
-        {
-            "task_id": "t_debug",
-            "prompt": "Fix the code snippet with a syntax error."
-        },
-        {
-            "task_id": "t_logic",
-            "prompt": "Solve this logic puzzle with constraints."
-        },
-        {
-            "task_id": "t_codegen",
-            "prompt": "Write a function to add two numbers."
-        }
+    tasks = [
+        {"task_id": "factual", "prompt": "What does a CPU cache do?"},
+        {"task_id": "math", "prompt": "Calculate 18% of 250 and add 17."},
+        {"task_id": "sentiment", "prompt": "Classify the sentiment: The service was fast but the meal was cold."},
+        {"task_id": "summary", "prompt": "Summarize in one sentence: Open standards help teams integrate software reliably."},
+        {"task_id": "ner", "prompt": "Extract named entities: Dr. Maya Chen met AMD engineers in Austin on July 2, 2026."},
+        {"task_id": "debug", "prompt": "Fix the bug in this Python code: def add(a,b): return a-b"},
+        {"task_id": "logic", "prompt": "Solve this logic puzzle: Ana is older than Bo. Bo is older than Cy. Who is youngest?"},
+        {"task_id": "codegen", "prompt": "Write a Python function is_even(n) that returns True for even integers."},
     ]
-    
-    with open("input/tasks.json", "w", encoding="utf-8") as f:
-        json.dump(mock_tasks, f, indent=2)
-        
-    print("Mock tasks written to input/tasks.json")
-    
-    # 2. Start mock server in background thread
-    server_port = 8000
-    server_thread = threading.Thread(target=run_mock_server, args=(HTTPServer, MockFireworksHandler, server_port))
-    server_thread.daemon = True
-    server_thread.start()
-    
-    print(f"Mock Fireworks API server started at http://127.0.0.1:{server_port}")
-    time.sleep(1)  # Allow server to start up
-    
-    # 3. Set environment variables
-    env = os.environ.copy()
-    env["FIREWORKS_API_KEY"] = "mock_api_key_123"
-    env["FIREWORKS_BASE_URL"] = f"http://127.0.0.1:{server_port}/v1"
-    env["ALLOWED_MODELS"] = "google/gemma-4-e2b-it,other-model"
-    
-    # 4. Run main.py as a subprocess
-    print("Running main.py agent...")
-    result = subprocess.run([sys.executable, "main.py"], env=env, capture_output=True, text=True)
-    
-    print("\n--- Agent stdout ---")
-    print(result.stdout)
-    print("--- Agent stderr ---")
-    print(result.stderr)
-    print("--------------------\n")
-    
-    if result.returncode != 0:
-        print("FAIL: main.py exited with non-zero code.")
-        sys.exit(1)
-        
-    # 5. Verify outputs
-    if not os.path.exists("output/results.json"):
-        print("FAIL: output/results.json was not created.")
-        sys.exit(1)
-        
-    try:
-        with open("output/results.json", "r", encoding="utf-8") as f:
-            output_data = json.load(f)
-    except Exception as e:
-        print(f"FAIL: Failed to parse output/results.json: {e}")
-        sys.exit(1)
-        
-    print("Output results:")
-    print(json.dumps(output_data, indent=2))
-    
-    if len(output_data) != len(mock_tasks):
-        print(f"FAIL: Number of tasks processed ({len(output_data)}) does not match input tasks ({len(mock_tasks)}).")
-        sys.exit(1)
-        
-    # Check that all keys are correct
-    for item in output_data:
-        if "task_id" not in item or "answer" not in item:
-            print(f"FAIL: Result entry is missing task_id or answer: {item}")
-            sys.exit(1)
-            
-    print("\nSUCCESS: All verification checks passed!")
+
+    port = 8000
+    thread = threading.Thread(target=run_mock_server, args=(port,), daemon=True)
+    thread.start()
+    time.sleep(0.5)
+
+    with TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+
+        input_path = input_dir / "tasks.json"
+        results_path = output_dir / "results.json"
+        input_path.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
+
+        env = os.environ.copy()
+        env["FIREWORKS_API_KEY"] = "mock-key"
+        env["FIREWORKS_BASE_URL"] = f"http://127.0.0.1:{port}/v1"
+        env["ALLOWED_MODELS"] = ",".join(ALLOWED_MODELS)
+        env["MAX_CONCURRENCY"] = "4"
+        env["INPUT_PATH"] = str(input_path)
+        env["OUTPUT_PATH"] = str(results_path)
+
+        result = subprocess.run([sys.executable, "main.py"], env=env, capture_output=True, text=True)
+        print("--- stdout ---")
+        print(result.stdout)
+        print("--- stderr ---")
+        print(result.stderr)
+
+        if result.returncode != 0:
+            raise SystemExit(f"main.py failed with exit code {result.returncode}")
+        if not results_path.exists():
+            raise SystemExit("results.json was not created")
+
+        output = json.loads(results_path.read_text(encoding="utf-8"))
+        if len(output) != len(tasks):
+            raise SystemExit(f"expected {len(tasks)} results, got {len(output)}")
+        if {item["task_id"] for item in output} != {task["task_id"] for task in tasks}:
+            raise SystemExit("result task_ids do not match input task_ids")
+        if any(set(item) != {"task_id", "answer"} or not item["answer"] for item in output):
+            raise SystemExit("each result must contain non-empty task_id and answer fields only")
+        if len(CALLS) != len(tasks):
+            raise SystemExit(f"expected {len(tasks)} Fireworks calls, got {len(CALLS)}")
+        if any(call["model"] not in ALLOWED_MODELS for call in CALLS):
+            raise SystemExit("agent called a model outside ALLOWED_MODELS")
+
+    print("SUCCESS: Track 1 contract test passed.")
+
 
 if __name__ == "__main__":
     main()
