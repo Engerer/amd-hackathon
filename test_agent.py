@@ -122,12 +122,10 @@ def main():
             raise SystemExit(f"expected {len(tasks)} results, got {len(output)}")
         if {json.dumps(item["task_id"]) for item in output} != {json.dumps(task["task_id"]) for task in tasks}:
             raise SystemExit("result task_ids do not match input task_ids")
-        expected_fields = {"task_id", "answer", "response"}
-        if any(set(item) != expected_fields or not item["answer"] or not item["response"] for item in output):
-            raise SystemExit("each result must contain non-empty task_id, answer, and response fields only")
-        if any(item["answer"] != item["response"] for item in output):
-            raise SystemExit("answer and response fields must match")
-        expected_calls = len(tasks) + 4
+        expected_fields = {"task_id", "response"}
+        if any(set(item) != expected_fields or not item["response"] for item in output):
+            raise SystemExit("each result must contain non-empty task_id and response fields only")
+        expected_calls = len(tasks)
         if len(CALLS) != expected_calls:
             raise SystemExit(f"expected {expected_calls} Fireworks calls, got {len(CALLS)}")
         if any(call["model"] not in ALLOWED_MODELS for call in CALLS):

@@ -56,4 +56,5 @@ jobs:
             ${{ steps.image.outputs.image_name }}:t1-fixed
             ${{ steps.image.outputs.image_name }}:t1-direct
             ${{ steps.image.outputs.image_name }}:t1-response
+            ${{ steps.image.outputs.image_name }}:t1-strict-response
             ${{ steps.image.outputs.image_name }}:t1-${{ github.sha }}

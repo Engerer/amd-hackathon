@@ -28,7 +28,7 @@ if INPUT_PATH == "/input/tasks.json" and not os.path.exists(INPUT_PATH) and os.p
 MAX_CONCURRENCY = min(max(int(os.getenv("MAX_CONCURRENCY", "8")), 1), 16)
 TASK_TIMEOUT_SECONDS = min(max(float(os.getenv("TASK_TIMEOUT_SECONDS", "28")), 10.0), 29.0)
 API_TIMEOUT_SECONDS = min(max(float(os.getenv("API_TIMEOUT_SECONDS", "24")), 8.0), 27.0)
-ENABLE_REVIEW_PASS = os.getenv("ENABLE_REVIEW_PASS", "1").strip().lower() not in {"0", "false", "no"}
+ENABLE_REVIEW_PASS = os.getenv("ENABLE_REVIEW_PASS", "0").strip().lower() in {"1", "true", "yes"}
 
 
 @dataclass(frozen=True)
@@ -211,11 +211,7 @@ def score_model(model_id: str, category: str) -> int:
 
 
 def ranked_models(allowed_models: list[str], category: str) -> list[str]:
-    return sorted(
-        allowed_models,
-        key=lambda model: (score_model(model, category), -allowed_models.index(model)),
-        reverse=True,
-    )
+    return allowed_models
 
 
 def read_tasks() -> list[dict[str, Any]]:
@@ -270,7 +266,6 @@ async def call_fireworks(
     response = await client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": profile.system_prompt},
             {"role": "user", "content": prompt},
         ],
         max_tokens=profile.max_tokens,
@@ -301,7 +296,6 @@ async def review_answer(
     response = await client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": profile.system_prompt},
             {"role": "user", "content": review_prompt},
         ],
         max_tokens=profile.max_tokens,
@@ -376,11 +370,7 @@ def write_results(results: list[dict[str, Any]]) -> None:
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
     clean_results = [
-        {
-            "task_id": result["task_id"],
-            "answer": result["answer"],
-            "response": result["answer"],
-        }
+        {"task_id": result["task_id"], "response": result["answer"]}
         for result in results
     ]
     tmp_path = f"{OUTPUT_PATH}.tmp"
