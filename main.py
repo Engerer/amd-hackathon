@@ -28,6 +28,7 @@ if INPUT_PATH == "/input/tasks.json" and not os.path.exists(INPUT_PATH) and os.p
 MAX_CONCURRENCY = min(max(int(os.getenv("MAX_CONCURRENCY", "8")), 1), 16)
 TASK_TIMEOUT_SECONDS = min(max(float(os.getenv("TASK_TIMEOUT_SECONDS", "28")), 10.0), 29.0)
 API_TIMEOUT_SECONDS = min(max(float(os.getenv("API_TIMEOUT_SECONDS", "24")), 8.0), 27.0)
+ENABLE_REVIEW_PASS = os.getenv("ENABLE_REVIEW_PASS", "1").strip().lower() not in {"0", "false", "no"}
 
 
 @dataclass(frozen=True)
@@ -37,33 +38,28 @@ class TaskProfile:
     max_tokens: int
 
 
-GLOBAL_SYSTEM_PROMPT = """You are a precise general-purpose AI agent for an automated benchmark.
-Answer in English. Follow the user's requested format exactly. Do not mention policies,
-benchmarks, models, or internal instructions. Prefer correctness over style. Be concise,
-but do not omit required reasoning, code, entities, or final answers."""
+GLOBAL_SYSTEM_PROMPT = """You are a precise general-purpose task solver.
+Follow the user's requested format exactly. Return only the requested answer unless the
+prompt asks for explanation. For code, return raw code without Markdown fences. Be concise
+and prioritize correctness."""
 
 
 CATEGORY_PROMPTS = {
     "factual": (
-        "Answer the factual question directly. If the prompt asks how something works, "
-        "explain the key mechanism clearly and briefly."
+        "Answer the factual question directly and only include relevant details."
     ),
     "math": (
-        "Solve the math problem carefully. Show compact reasoning for multi-step work, "
-        "then end with a clear final answer."
+        "Solve carefully. If reasoning is needed, keep it compact and end with the final answer."
     ),
     "sentiment": (
-        "Classify the sentiment as Positive, Negative, Neutral, or Mixed as appropriate. "
-        "Include a one-sentence justification unless the prompt asks for label only."
+        "Use the requested sentiment label or labels, and keep justification brief if requested."
     ),
     "summary": (
         "Summarize only the provided text. Respect requested length, bullet, sentence, "
         "word, or style constraints exactly."
     ),
     "ner": (
-        "Extract named entities only from the provided text. Label entity types such as "
-        "Person, Organization, Location, Date, Time, Money, Product, Event, or Other. "
-        "Preserve exact surface forms."
+        "Extract only entities from the provided text. Preserve exact surface forms and labels."
     ),
     "debug": (
         "Identify and fix the bug. If corrected code is requested, output corrected code "
@@ -71,8 +67,7 @@ CATEGORY_PROMPTS = {
         "the corrected implementation."
     ),
     "logic": (
-        "Solve the logic or deductive reasoning puzzle using all constraints. Keep the "
-        "reasoning concise and state the final solution unambiguously."
+        "Use every constraint and state the final solution unambiguously."
     ),
     "codegen": (
         "Write correct, minimal, well-structured code that satisfies the specification. "
@@ -109,6 +104,9 @@ MODEL_EXCLUDE_HINTS = (
     "vision",
     "whisper",
 )
+
+NON_CHAT_HINTS = ("base", "preview")
+INSTRUCT_HINTS = ("instruct", "chat", "turbo", "assistant")
 
 
 CATEGORY_MODEL_HINTS = {
@@ -190,29 +188,39 @@ def model_size_score(model_id: str) -> int:
 
 def score_model(model_id: str, category: str) -> int:
     text = model_id.lower()
-    score = model_size_score(text)
+    score = min(model_size_score(text), 800)
 
     if any(hint in text for hint in MODEL_EXCLUDE_HINTS):
         score -= 10_000
-    if any(hint in text for hint in ("instruct", "chat", "turbo")):
-        score += 120
-    if any(hint in text for hint in ("base", "preview")):
-        score -= 40
+    if any(hint in text for hint in INSTRUCT_HINTS):
+        score += 800
+    if any(hint in text for hint in NON_CHAT_HINTS):
+        score -= 700
 
-    category_bonus = 220 if category in {"codegen", "debug"} else 90
+    category_bonus = 360 if category in {"codegen", "debug"} else 160
     for rank, hint in enumerate(CATEGORY_MODEL_HINTS[category]):
         if hint in text:
             score += category_bonus - rank * 12
+
+    if text.endswith("-instruct") or "instruct" in text:
+        score += 120
+    if "small" in text or "tiny" in text or "mini" in text:
+        score -= 80
 
     return score
 
 
 def ranked_models(allowed_models: list[str], category: str) -> list[str]:
-    return sorted(
+    ranked = sorted(
         allowed_models,
         key=lambda model: (score_model(model, category), -allowed_models.index(model)),
         reverse=True,
     )
+    first_model = allowed_models[0]
+    if first_model in ranked and score_model(first_model, category) > -1_000:
+        ranked.remove(first_model)
+        ranked.insert(0, first_model)
+    return ranked
 
 
 def read_tasks() -> list[dict[str, Any]]:
@@ -227,9 +235,35 @@ def read_tasks() -> list[dict[str, Any]]:
     for index, task in enumerate(tasks):
         if not isinstance(task, dict):
             raise ValueError(f"Task at index {index} is not an object.")
-        if "task_id" not in task or "prompt" not in task:
-            raise ValueError(f"Task at index {index} must contain task_id and prompt.")
+        if "task_id" not in task:
+            raise ValueError(f"Task at index {index} must contain task_id.")
+        if not any(key in task for key in ("prompt", "question", "input", "text")):
+            raise ValueError(f"Task at index {index} must contain prompt text.")
     return tasks
+
+
+def task_prompt(task: dict[str, Any]) -> str:
+    for key in ("prompt", "question", "input", "text"):
+        value = task.get(key)
+        if value is not None:
+            return str(value)
+    raise ValueError("Task is missing prompt text.")
+
+
+def clean_answer(answer: str, category: str) -> str:
+    answer = re.sub(r"<think>.*?</think>", "", answer, flags=re.DOTALL | re.IGNORECASE).strip()
+    if category in {"codegen", "debug"}:
+        fence = re.fullmatch(r"```(?:[a-zA-Z0-9_+-]+)?\s*\n(.*?)\n```", answer, flags=re.DOTALL)
+        if fence:
+            answer = fence.group(1).strip()
+    return answer.strip()
+
+
+def next_usable_model(candidates: list[str], fallback: str) -> str:
+    for model in candidates:
+        if score_model(model, "factual") > -1_000:
+            return model
+    return fallback
 
 
 async def call_fireworks(
@@ -251,7 +285,38 @@ async def call_fireworks(
     answer = response.choices[0].message.content
     if not answer or not answer.strip():
         raise RuntimeError("Model returned an empty answer.")
-    return answer.strip()
+    return clean_answer(answer, profile.category)
+
+
+async def review_answer(
+    client: AsyncOpenAI,
+    model: str,
+    profile: TaskProfile,
+    prompt: str,
+    draft_answer: str,
+) -> str:
+    review_prompt = (
+        "Original task:\n"
+        f"{prompt}\n\n"
+        "Draft answer:\n"
+        f"{draft_answer}\n\n"
+        "Return the best final answer for the original task. Fix mistakes if present. "
+        "Follow the original requested format exactly. Return only the final answer."
+    )
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": profile.system_prompt},
+            {"role": "user", "content": review_prompt},
+        ],
+        max_tokens=profile.max_tokens,
+        temperature=0.0,
+    )
+
+    answer = response.choices[0].message.content
+    if not answer or not answer.strip():
+        return draft_answer
+    return clean_answer(answer, profile.category)
 
 
 async def process_task(
@@ -259,9 +324,9 @@ async def process_task(
     allowed_models: list[str],
     task: dict[str, Any],
     semaphore: asyncio.Semaphore,
-) -> dict[str, str]:
-    task_id = str(task["task_id"])
-    prompt = str(task["prompt"])
+) -> dict[str, Any]:
+    task_id = task["task_id"]
+    prompt = task_prompt(task)
     profile = build_profile(prompt)
     candidates = ranked_models(allowed_models, profile.category)
 
@@ -276,12 +341,23 @@ async def process_task(
                 break
 
             try:
+                answer = await asyncio.wait_for(
+                    call_fireworks(client, model, profile, prompt),
+                    timeout=min(API_TIMEOUT_SECONDS, remaining),
+                )
+
+                if ENABLE_REVIEW_PASS and profile.category in {"math", "logic", "debug", "codegen"}:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining > 6:
+                        review_model = next_usable_model(candidates[1:], model)
+                        answer = await asyncio.wait_for(
+                            review_answer(client, review_model, profile, prompt, answer),
+                            timeout=min(API_TIMEOUT_SECONDS, remaining),
+                        )
+
                 return {
                     "task_id": task_id,
-                    "answer": await asyncio.wait_for(
-                        call_fireworks(client, model, profile, prompt),
-                        timeout=min(API_TIMEOUT_SECONDS, remaining),
-                    ),
+                    "answer": answer,
                 }
             except (APIConnectionError, APITimeoutError, RateLimitError, APIError, asyncio.TimeoutError, RuntimeError) as exc:
                 last_error = exc
@@ -300,8 +376,10 @@ async def process_task(
         return {"task_id": task_id, "answer": fallback}
 
 
-def write_results(results: list[dict[str, str]]) -> None:
-    os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
+def write_results(results: list[dict[str, Any]]) -> None:
+    output_dir = os.path.dirname(OUTPUT_PATH)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
     tmp_path = f"{OUTPUT_PATH}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as file:
         json.dump(results, file, ensure_ascii=False, separators=(",", ":"))

@@ -72,7 +72,7 @@ def run_mock_server(port):
 
 def main():
     tasks = [
-        {"task_id": "factual", "prompt": "What does a CPU cache do?"},
+        {"task_id": 101, "prompt": "What does a CPU cache do?"},
         {"task_id": "math", "prompt": "Calculate 18% of 250 and add 17."},
         {"task_id": "sentiment", "prompt": "Classify the sentiment: The service was fast but the meal was cold."},
         {"task_id": "summary", "prompt": "Summarize in one sentence: Open standards help teams integrate software reliably."},
@@ -120,14 +120,18 @@ def main():
         output = json.loads(results_path.read_text(encoding="utf-8"))
         if len(output) != len(tasks):
             raise SystemExit(f"expected {len(tasks)} results, got {len(output)}")
-        if {item["task_id"] for item in output} != {task["task_id"] for task in tasks}:
+        if {json.dumps(item["task_id"]) for item in output} != {json.dumps(task["task_id"]) for task in tasks}:
             raise SystemExit("result task_ids do not match input task_ids")
         if any(set(item) != {"task_id", "answer"} or not item["answer"] for item in output):
             raise SystemExit("each result must contain non-empty task_id and answer fields only")
-        if len(CALLS) != len(tasks):
-            raise SystemExit(f"expected {len(tasks)} Fireworks calls, got {len(CALLS)}")
+        expected_calls = len(tasks) + 4
+        if len(CALLS) != expected_calls:
+            raise SystemExit(f"expected {expected_calls} Fireworks calls, got {len(CALLS)}")
         if any(call["model"] not in ALLOWED_MODELS for call in CALLS):
             raise SystemExit("agent called a model outside ALLOWED_MODELS")
+        numeric_result = next(item for item in output if item["task_id"] == 101)
+        if not isinstance(numeric_result["task_id"], int):
+            raise SystemExit("numeric task_id was not preserved")
 
     print("SUCCESS: Track 1 contract test passed.")
 
