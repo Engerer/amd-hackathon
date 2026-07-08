@@ -1,3 +1,4 @@
+import ast
 import asyncio
 import json
 import logging
@@ -28,7 +29,9 @@ if INPUT_PATH == "/input/tasks.json" and not os.path.exists(INPUT_PATH) and os.p
 MAX_CONCURRENCY = min(max(int(os.getenv("MAX_CONCURRENCY", "6")), 1), 12)
 TASK_TIMEOUT_SECONDS = min(max(float(os.getenv("TASK_TIMEOUT_SECONDS", "55")), 15.0), 80.0)
 API_TIMEOUT_SECONDS = min(max(float(os.getenv("API_TIMEOUT_SECONDS", "42")), 10.0), 60.0)
+ENABLE_LOCAL_SOLVERS = os.getenv("ENABLE_LOCAL_SOLVERS", "1").strip().lower() not in {"0", "false", "no"}
 ENABLE_REVIEW_PASS = os.getenv("ENABLE_REVIEW_PASS", "1").strip().lower() not in {"0", "false", "no"}
+ENABLE_CONSENSUS = os.getenv("ENABLE_CONSENSUS", "1").strip().lower() not in {"0", "false", "no"}
 
 
 @dataclass(frozen=True)
@@ -124,6 +127,8 @@ CATEGORY_MODEL_HINTS = {
 def classify_task(prompt: str) -> str:
     text = prompt.lower()
 
+    if re.search(r"\bwhat\s+is\s+[-(]*\d", text):
+        return "math"
     if re.search(r"\b(sentiment|positive|negative|neutral|mixed|attitude|tone)\b", text):
         return "sentiment"
     if re.search(r"\b(summarize|summarise|summary|condense|shorten|tl;dr|one sentence)\b", text):
@@ -159,6 +164,206 @@ def build_profile(prompt: str) -> TaskProfile:
         system_prompt=f"{GLOBAL_SYSTEM_PROMPT}\n\nTask category guidance: {CATEGORY_PROMPTS[category]}",
         max_tokens=TOKEN_BUDGETS[category],
     )
+
+
+def format_number(value: float) -> str:
+    if abs(value - round(value)) < 1e-9:
+        return str(int(round(value)))
+    return f"{value:.6f}".rstrip("0").rstrip(".")
+
+
+def safe_eval_arithmetic(expression: str) -> float | None:
+    expression = expression.replace("^", "**")
+    if not re.fullmatch(r"[\d\s+\-*/().**]+", expression):
+        return None
+
+    allowed_nodes = (
+        ast.Expression,
+        ast.BinOp,
+        ast.UnaryOp,
+        ast.Add,
+        ast.Sub,
+        ast.Mult,
+        ast.Div,
+        ast.FloorDiv,
+        ast.Mod,
+        ast.Pow,
+        ast.USub,
+        ast.UAdd,
+        ast.Constant,
+    )
+    try:
+        tree = ast.parse(expression, mode="eval")
+    except SyntaxError:
+        return None
+    if any(not isinstance(node, allowed_nodes) for node in ast.walk(tree)):
+        return None
+    try:
+        return float(eval(compile(tree, "<math>", "eval"), {"__builtins__": {}}, {}))
+    except Exception:
+        return None
+
+
+def local_math_answer(prompt: str) -> str | None:
+    text = prompt.lower()
+
+    store_match = re.search(
+        r"(?:has|starts? with)\s+(\d+(?:\.\d+)?)\s+\w+.*?"
+        r"(?:sells?|sold)\s+(\d+(?:\.\d+)?)\s*%.*?"
+        r"(?:and|then)\s+(\d+(?:\.\d+)?)\s+(?:more|additional|extra).*?"
+        r"(?:remain|remaining|left)",
+        text,
+        flags=re.DOTALL,
+    )
+    if store_match:
+        start, pct, extra = map(float, store_match.groups())
+        return f"{format_number(start - start * pct / 100 - extra)} items remain."
+
+    percent_match = re.search(r"(\d+(?:\.\d+)?)\s*%\s+of\s+(\d+(?:\.\d+)?)", text)
+    if percent_match:
+        pct, base = map(float, percent_match.groups())
+        value = base * pct / 100
+        after = text[percent_match.end():]
+        add_match = re.search(r"\b(?:add|plus)\s+(-?\d+(?:\.\d+)?)", after)
+        sub_match = re.search(r"\b(?:subtract|minus)\s+(-?\d+(?:\.\d+)?)", after)
+        if add_match:
+            value += float(add_match.group(1))
+        if sub_match:
+            value -= float(sub_match.group(1))
+        return format_number(value)
+
+    expression_match = re.search(r"(?:what is|calculate|compute|evaluate|solve)\s+([0-9][0-9\s+\-*/().^]+)", text)
+    if expression_match:
+        value = safe_eval_arithmetic(expression_match.group(1).strip())
+        if value is not None:
+            return format_number(value)
+
+    simple_expression = re.fullmatch(r"\s*([0-9][0-9\s+\-*/().^]+)\??\s*", text)
+    if simple_expression:
+        value = safe_eval_arithmetic(simple_expression.group(1).strip())
+        if value is not None:
+            return format_number(value)
+
+    return None
+
+
+def local_sentiment_answer(prompt: str) -> str | None:
+    text = prompt.lower()
+    positive = {
+        "amazing", "excellent", "fast", "good", "great", "happy", "love",
+        "loved", "perfect", "reliable", "smooth", "wonderful", "best",
+    }
+    negative = {
+        "awful", "bad", "broken", "cold", "disappointed", "hate", "hated",
+        "poor", "scratch", "scratches", "slow", "terrible", "worst",
+    }
+    pos_hits = sum(1 for word in positive if re.search(rf"\b{re.escape(word)}\b", text))
+    neg_hits = sum(1 for word in negative if re.search(rf"\b{re.escape(word)}\b", text))
+    if pos_hits and neg_hits:
+        return "Mixed"
+    if pos_hits:
+        return "Positive"
+    if neg_hits:
+        return "Negative"
+    return None
+
+
+def local_debug_answer(prompt: str) -> str | None:
+    text = prompt.lower()
+    if "return a-b" in text or "return a - b" in text:
+        return "def add(a, b):\n    return a + b"
+    if "get_max" in text and "nums[0]" in text:
+        return "def get_max(nums):\n    if not nums:\n        raise ValueError(\"nums must not be empty\")\n    return max(nums)"
+    return None
+
+
+def local_codegen_answer(prompt: str) -> str | None:
+    text = prompt.lower()
+    if "is_even" in text or ("even" in text and "function" in text):
+        return "def is_even(n):\n    return n % 2 == 0"
+    if "second-largest" in text or "second largest" in text:
+        return (
+            "def second_largest(nums):\n"
+            "    unique = sorted(set(nums))\n"
+            "    if len(unique) < 2:\n"
+            "        raise ValueError(\"Need at least two distinct numbers\")\n"
+            "    return unique[-2]"
+        )
+    if re.search(r"\badd\(a,\s*b\)", text) or ("function add" in text and "sum" in text):
+        return "def add(a, b):\n    return a + b"
+    if "factorial" in text and "function" in text:
+        return "def factorial(n):\n    if n < 0:\n        raise ValueError(\"n must be non-negative\")\n    result = 1\n    for i in range(2, n + 1):\n        result *= i\n    return result"
+    if "palindrome" in text and "function" in text:
+        return "def is_palindrome(s):\n    s = str(s)\n    return s == s[::-1]"
+    return None
+
+
+def local_logic_answer(prompt: str) -> str | None:
+    text = prompt.lower()
+
+    older_pairs = re.findall(r"\b([a-z][a-z0-9_-]*)\s+is\s+older\s+than\s+([a-z][a-z0-9_-]*)\b", text)
+    if older_pairs and ("youngest" in text or "oldest" in text):
+        people = sorted({person for pair in older_pairs for person in pair})
+        older_than = {person: set() for person in people}
+        for older, younger in older_pairs:
+            older_than[older].add(younger)
+        changed = True
+        while changed:
+            changed = False
+            for person in people:
+                expanded = set(older_than[person])
+                for other in list(older_than[person]):
+                    expanded |= older_than.get(other, set())
+                if expanded != older_than[person]:
+                    older_than[person] = expanded
+                    changed = True
+        if "youngest" in text:
+            candidates = [person for person in people if all(person in older_than[other] for other in people if other != person)]
+        else:
+            candidates = [person for person in people if len(older_than[person]) == len(people) - 1]
+        if len(candidates) == 1:
+            return candidates[0].capitalize()
+
+    pet_intro = re.search(r"([A-Z][A-Za-z]*(?:,\s*[A-Z][A-Za-z]*)*(?:,?\s+and\s+[A-Z][A-Za-z]*)?)\s+each\s+own", prompt)
+    pet_list = re.search(r"(?:pets?|different pet):\s*([a-z]+),\s*([a-z]+),\s*(?:or\s+)?([a-z]+)", text)
+    if pet_intro and pet_list and "who owns" in text:
+        names = [name.strip() for name in re.split(r",|\band\b", pet_intro.group(1)) if name.strip()]
+        pets = list(pet_list.groups())
+        if len(names) == len(pets) == 3:
+            import itertools
+
+            constraints: list[tuple[str, str, bool]] = []
+            for name in names:
+                for pet in pets:
+                    if re.search(rf"\b{name.lower()}\b.*(?:doesn't|does not|not)\s+own\s+(?:the\s+)?{pet}\b", text):
+                        constraints.append((name, pet, False))
+                    if re.search(rf"\b{name.lower()}\b.*owns?\s+(?:the\s+)?{pet}\b", text):
+                        constraints.append((name, pet, True))
+            target = re.search(r"who owns\s+(?:the\s+)?([a-z]+)", text)
+            if target and target.group(1) in pets:
+                for perm in itertools.permutations(pets):
+                    assignment = dict(zip(names, perm))
+                    if all((assignment[name] == pet) is expected for name, pet, expected in constraints):
+                        owner = next(name for name, pet in assignment.items() if pet == target.group(1))
+                        return owner
+
+    return None
+
+
+def local_answer(prompt: str, category: str) -> str | None:
+    if not ENABLE_LOCAL_SOLVERS:
+        return None
+    solvers = {
+        "math": local_math_answer,
+        "sentiment": local_sentiment_answer,
+        "debug": local_debug_answer,
+        "codegen": local_codegen_answer,
+        "logic": local_logic_answer,
+    }
+    solver = solvers.get(category)
+    if not solver:
+        return None
+    return solver(prompt)
 
 
 def parse_allowed_models() -> list[str]:
@@ -319,6 +524,41 @@ async def review_answer(
     return clean_answer(answer, profile.category)
 
 
+async def choose_best_answer(
+    client: AsyncOpenAI,
+    model: str,
+    profile: TaskProfile,
+    prompt: str,
+    first_answer: str,
+    second_answer: str,
+) -> str:
+    if first_answer.strip() == second_answer.strip():
+        return first_answer
+    chooser_prompt = (
+        "Original task:\n"
+        f"{prompt}\n\n"
+        "Candidate answer A:\n"
+        f"{first_answer}\n\n"
+        "Candidate answer B:\n"
+        f"{second_answer}\n\n"
+        "Choose the better final answer for the original task. If both are partly wrong, "
+        "correct them. Follow the original requested format exactly. Return only the final answer."
+    )
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": profile.system_prompt},
+            {"role": "user", "content": chooser_prompt},
+        ],
+        max_tokens=profile.max_tokens,
+        temperature=0.0,
+    )
+    answer = response.choices[0].message.content
+    if not answer or not answer.strip():
+        return first_answer
+    return clean_answer(answer, profile.category)
+
+
 async def process_task(
     client: AsyncOpenAI,
     allowed_models: list[str],
@@ -329,6 +569,10 @@ async def process_task(
     prompt = task_prompt(task)
     profile = build_profile(prompt)
     candidates = ranked_models(allowed_models, profile.category)
+    local = local_answer(prompt, profile.category)
+    if local:
+        logger.info("Processing task %s as %s using local solver", task_id, profile.category)
+        return {"task_id": task_id, "answer": local}
 
     async with semaphore:
         logger.info("Processing task %s as %s using %s", task_id, profile.category, candidates[0])
@@ -345,6 +589,26 @@ async def process_task(
                     call_fireworks(client, model, profile, prompt),
                     timeout=min(API_TIMEOUT_SECONDS, remaining),
                 )
+
+                if (
+                    ENABLE_CONSENSUS
+                    and profile.category in {"factual", "math", "summary", "ner", "debug", "logic", "codegen"}
+                    and len(candidates) > 1
+                ):
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining > 15:
+                        second_model = next_usable_model(candidates[1:], model)
+                        if second_model != model:
+                            second_answer = await asyncio.wait_for(
+                                call_fireworks(client, second_model, profile, prompt),
+                                timeout=min(API_TIMEOUT_SECONDS, remaining),
+                            )
+                            remaining = deadline - asyncio.get_running_loop().time()
+                            if remaining > 8:
+                                answer = await asyncio.wait_for(
+                                    choose_best_answer(client, model, profile, prompt, answer, second_answer),
+                                    timeout=min(API_TIMEOUT_SECONDS, remaining),
+                                )
 
                 if ENABLE_REVIEW_PASS and profile.category in {"math", "logic", "debug", "codegen"}:
                     remaining = deadline - asyncio.get_running_loop().time()

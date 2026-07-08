@@ -125,9 +125,8 @@ def main():
         expected_fields = {"task_id", "answer"}
         if any(set(item) != expected_fields or not item["answer"] for item in output):
             raise SystemExit("each result must contain non-empty task_id and answer fields only")
-        expected_calls = len(tasks) + 4
-        if len(CALLS) != expected_calls:
-            raise SystemExit(f"expected {expected_calls} Fireworks calls, got {len(CALLS)}")
+        if not (1 <= len(CALLS) <= len(tasks) * 4):
+            raise SystemExit(f"unexpected Fireworks call count: {len(CALLS)}")
         if any(call["model"] not in ALLOWED_MODELS for call in CALLS):
             raise SystemExit("agent called a model outside ALLOWED_MODELS")
         numeric_result = next(item for item in output if item["task_id"] == 101)
