@@ -208,7 +208,7 @@ def read_tasks() -> list[dict[str, Any]]:
     if not os.path.exists(INPUT_PATH):
         raise FileNotFoundError(f"Input file not found: {INPUT_PATH}")
 
-    with open(INPUT_PATH, "r", encoding="utf-8") as file:
+    with open(INPUT_PATH, "r", encoding="utf-8-sig") as file:
         tasks = json.load(file)
 
     if not isinstance(tasks, list):
