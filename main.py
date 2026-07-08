@@ -268,7 +268,6 @@ async def call_fireworks(
         messages=[
             {"role": "user", "content": prompt},
         ],
-        max_tokens=profile.max_tokens,
         temperature=0.0,
     )
 
@@ -298,7 +297,6 @@ async def review_answer(
         messages=[
             {"role": "user", "content": review_prompt},
         ],
-        max_tokens=profile.max_tokens,
         temperature=0.0,
     )
 
@@ -370,7 +368,7 @@ def write_results(results: list[dict[str, Any]]) -> None:
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
     clean_results = [
-        {"task_id": result["task_id"], "response": result["answer"]}
+        {"task_id": result["task_id"], "answer": result["answer"]}
         for result in results
     ]
     tmp_path = f"{OUTPUT_PATH}.tmp"
