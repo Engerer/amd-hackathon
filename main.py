@@ -67,7 +67,8 @@ CATEGORY_PROMPTS = {
     ),
     "debug": (
         "Identify and fix the bug. If corrected code is requested, output corrected code "
-        "only. If explanation is requested, keep it brief and include the corrected implementation."
+        "only, with no Markdown fences. If explanation is requested, keep it brief and include "
+        "the corrected implementation."
     ),
     "logic": (
         "Solve the logic or deductive reasoning puzzle using all constraints. Keep the "
@@ -75,7 +76,8 @@ CATEGORY_PROMPTS = {
     ),
     "codegen": (
         "Write correct, minimal, well-structured code that satisfies the specification. "
-        "Output code only unless the prompt explicitly asks for explanation."
+        "Output raw code only, with no Markdown fences, unless the prompt explicitly asks "
+        "for explanation."
     ),
 }
 
@@ -135,9 +137,18 @@ def classify_task(prompt: str) -> str:
         return "debug"
     if re.search(r"\b(write|implement|create|complete)\b.*\b(function|class|method|program|script|algorithm|code)\b", text):
         return "codegen"
-    if re.search(r"\b(logic|deductive|constraint|puzzle|riddle|truth-teller|arrangement|satisfy all)\b", text):
+    if re.search(
+        r"\b(logic|deductive|constraint|puzzle|riddle|truth-teller|arrangement|satisfy all|"
+        r"each own|different pet|who owns|older than|younger than|left of|right of)\b",
+        text,
+    ):
         return "logic"
-    if re.search(r"\b(calculate|compute|solve|arithmetic|percentage|percent|ratio|probability|equation|projection)\b", text):
+    if re.search(
+        r"\b(calculate|compute|solve|arithmetic|percentage|percent|ratio|probability|"
+        r"equation|projection|how many|how much|remain|remaining|left|sold|total|"
+        r"cost|price|discount|increase|decrease)\b",
+        text,
+    ):
         return "math"
     return "factual"
 
