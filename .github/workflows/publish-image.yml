@@ -54,4 +54,5 @@ jobs:
             ${{ steps.image.outputs.image_name }}:latest
             ${{ steps.image.outputs.image_name }}:amd64
             ${{ steps.image.outputs.image_name }}:t1-fixed
+            ${{ steps.image.outputs.image_name }}:t1-direct
             ${{ steps.image.outputs.image_name }}:t1-${{ github.sha }}

@@ -28,7 +28,7 @@ if INPUT_PATH == "/input/tasks.json" and not os.path.exists(INPUT_PATH) and os.p
 MAX_CONCURRENCY = min(max(int(os.getenv("MAX_CONCURRENCY", "8")), 1), 16)
 TASK_TIMEOUT_SECONDS = min(max(float(os.getenv("TASK_TIMEOUT_SECONDS", "28")), 10.0), 29.0)
 API_TIMEOUT_SECONDS = min(max(float(os.getenv("API_TIMEOUT_SECONDS", "24")), 8.0), 27.0)
-ENABLE_REVIEW_PASS = os.getenv("ENABLE_REVIEW_PASS", "1").strip().lower() not in {"0", "false", "no"}
+ENABLE_REVIEW_PASS = os.getenv("ENABLE_REVIEW_PASS", "0").strip().lower() in {"1", "true", "yes"}
 
 
 @dataclass(frozen=True)
@@ -38,10 +38,7 @@ class TaskProfile:
     max_tokens: int
 
 
-GLOBAL_SYSTEM_PROMPT = """You are a precise general-purpose task solver.
-Follow the user's requested format exactly. Return only the requested answer unless the
-prompt asks for explanation. For code, return raw code without Markdown fences. Be concise
-and prioritize correctness."""
+GLOBAL_SYSTEM_PROMPT = """Answer the user's task directly. Follow the requested format exactly."""
 
 
 CATEGORY_PROMPTS = {
@@ -211,16 +208,11 @@ def score_model(model_id: str, category: str) -> int:
 
 
 def ranked_models(allowed_models: list[str], category: str) -> list[str]:
-    ranked = sorted(
+    return sorted(
         allowed_models,
         key=lambda model: (score_model(model, category), -allowed_models.index(model)),
         reverse=True,
     )
-    first_model = allowed_models[0]
-    if first_model in ranked and score_model(first_model, category) > -1_000:
-        ranked.remove(first_model)
-        ranked.insert(0, first_model)
-    return ranked
 
 
 def read_tasks() -> list[dict[str, Any]]:
@@ -275,7 +267,6 @@ async def call_fireworks(
     response = await client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": profile.system_prompt},
             {"role": "user", "content": prompt},
         ],
         max_tokens=profile.max_tokens,
@@ -306,7 +297,6 @@ async def review_answer(
     response = await client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": profile.system_prompt},
             {"role": "user", "content": review_prompt},
         ],
         max_tokens=profile.max_tokens,
@@ -370,19 +360,23 @@ async def process_task(
                 )
                 await asyncio.sleep(min(0.5 * attempt, max(deadline - asyncio.get_running_loop().time(), 0)))
 
-        fallback = "I could not produce a reliable answer within the allowed runtime."
+        fallback = "I don't know."
         if last_error:
             logger.error("Task %s failed after allowed attempts: %s", task_id, last_error)
-        return {"task_id": task_id, "answer": fallback}
+        return {"task_id": task_id, "answer": fallback, "_failed": True}
 
 
 def write_results(results: list[dict[str, Any]]) -> None:
     output_dir = os.path.dirname(OUTPUT_PATH)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
+    clean_results = [
+        {"task_id": result["task_id"], "answer": result["answer"]}
+        for result in results
+    ]
     tmp_path = f"{OUTPUT_PATH}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as file:
-        json.dump(results, file, ensure_ascii=False, separators=(",", ":"))
+        json.dump(clean_results, file, ensure_ascii=False, separators=(",", ":"))
     os.replace(tmp_path, OUTPUT_PATH)
 
 
@@ -411,6 +405,10 @@ async def run() -> int:
     results = await asyncio.gather(
         *(process_task(client, allowed_models, task, semaphore) for task in tasks)
     )
+    failed_count = sum(1 for result in results if result.get("_failed"))
+    if failed_count == len(results):
+        logger.error("All tasks failed API/model calls; refusing to submit all fallback answers.")
+        return 1
 
     try:
         write_results(results)

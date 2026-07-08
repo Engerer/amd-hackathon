@@ -124,7 +124,7 @@ def main():
             raise SystemExit("result task_ids do not match input task_ids")
         if any(set(item) != {"task_id", "answer"} or not item["answer"] for item in output):
             raise SystemExit("each result must contain non-empty task_id and answer fields only")
-        expected_calls = len(tasks) + 4
+        expected_calls = len(tasks)
         if len(CALLS) != expected_calls:
             raise SystemExit(f"expected {expected_calls} Fireworks calls, got {len(CALLS)}")
         if any(call["model"] not in ALLOWED_MODELS for call in CALLS):
