@@ -1,0 +1,34 @@
+[
+  {
+    "task_id": "t_factual",
+    "answer": "[Mock Response using model google/gemma-4-e2b-it] Received system prompt: 'Provide a direct, accurate, and concise answer to the question. Do not include introductory or concluding remarks.' and user prompt: 'What is the capital of France?'"
+  },
+  {
+    "task_id": "t_math",
+    "answer": "[Mock Response using model google/gemma-4-e2b-it] Received system prompt: 'Solve the math problem step-by-step briefly, then clearly state the final answer. Keep explanations concise.' and user prompt: 'Calculate the sum of 15 and 27.'"
+  },
+  {
+    "task_id": "t_sentiment",
+    "answer": "[Mock Response using model google/gemma-4-e2b-it] Received system prompt: 'Identify the sentiment (Positive/Negative/Neutral) and provide a one-sentence justification. Format: Sentiment: <sentiment>. Justification: <reason>.' and user prompt: 'Classify the sentiment: I love this new product!'"
+  },
+  {
+    "task_id": "t_summary",
+    "answer": "[Mock Response using model google/gemma-4-e2b-it] Received system prompt: 'Summarize the provided text to satisfy the requested constraint (e.g. length, sentence count). Be highly concise.' and user prompt: 'Summarize this: The quick brown fox jumps over the lazy dog.'"
+  },
+  {
+    "task_id": "t_ner",
+    "answer": "[Mock Response using model google/gemma-4-e2b-it] Received system prompt: 'Extract and list the requested entities (Person, Organization, Location, Date) in a clean format.' and user prompt: 'Extract person entities: John Doe went to Paris.'"
+  },
+  {
+    "task_id": "t_debug",
+    "answer": "[Mock Response using model google/gemma-4-e2b-it] Received system prompt: 'Output ONLY the corrected code snippet. No markdown blocks unless necessary. Do not provide explanations.' and user prompt: 'Fix the code snippet with a syntax error.'"
+  },
+  {
+    "task_id": "t_logic",
+    "answer": "[Mock Response using model google/gemma-4-e2b-it] Received system prompt: 'Resolve the logic puzzle step-by-step and state the final solution. Keep the reasoning clean and brief.' and user prompt: 'Solve this logic puzzle with constraints.'"
+  },
+  {
+    "task_id": "t_codegen",
+    "answer": "[Mock Response using model google/gemma-4-e2b-it] Received system prompt: 'Output ONLY the required code. No explanations. No comments. Be extremely concise.' and user prompt: 'Write a function to add two numbers.'"
+  }
+]
