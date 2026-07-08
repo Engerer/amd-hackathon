@@ -25,10 +25,10 @@ if INPUT_PATH == "/input/tasks.json" and not os.path.exists(INPUT_PATH) and os.p
     INPUT_PATH = "input/tasks.json"
     OUTPUT_PATH = "output/results.json"
 
-MAX_CONCURRENCY = min(max(int(os.getenv("MAX_CONCURRENCY", "8")), 1), 16)
-TASK_TIMEOUT_SECONDS = min(max(float(os.getenv("TASK_TIMEOUT_SECONDS", "28")), 10.0), 29.0)
-API_TIMEOUT_SECONDS = min(max(float(os.getenv("API_TIMEOUT_SECONDS", "24")), 8.0), 27.0)
-ENABLE_REVIEW_PASS = os.getenv("ENABLE_REVIEW_PASS", "0").strip().lower() in {"1", "true", "yes"}
+MAX_CONCURRENCY = min(max(int(os.getenv("MAX_CONCURRENCY", "6")), 1), 12)
+TASK_TIMEOUT_SECONDS = min(max(float(os.getenv("TASK_TIMEOUT_SECONDS", "55")), 15.0), 80.0)
+API_TIMEOUT_SECONDS = min(max(float(os.getenv("API_TIMEOUT_SECONDS", "42")), 10.0), 60.0)
+ENABLE_REVIEW_PASS = os.getenv("ENABLE_REVIEW_PASS", "1").strip().lower() not in {"0", "false", "no"}
 
 
 @dataclass(frozen=True)
@@ -46,20 +46,20 @@ and prioritize correctness."""
 
 CATEGORY_PROMPTS = {
     "factual": (
-        "Answer the factual question directly and only include relevant details."
+        "Answer the factual question directly. If there are multiple parts, answer all parts."
     ),
     "math": (
-        "Solve carefully. If reasoning is needed, keep it compact and end with the final answer."
+        "Solve step by step internally. Check arithmetic carefully. End with a clear final answer."
     ),
     "sentiment": (
-        "Use the requested sentiment label or labels, and keep justification brief if requested."
+        "Use the requested sentiment label exactly. If no label set is given, use Positive, Negative, Neutral, or Mixed."
     ),
     "summary": (
         "Summarize only the provided text. Respect requested length, bullet, sentence, "
         "word, or style constraints exactly."
     ),
     "ner": (
-        "Extract only entities from the provided text. Preserve exact surface forms and labels."
+        "Extract only named entities from the provided text. Preserve exact surface forms and label entity types."
     ),
     "debug": (
         "Identify and fix the bug. If corrected code is requested, output corrected code "
@@ -67,7 +67,7 @@ CATEGORY_PROMPTS = {
         "the corrected implementation."
     ),
     "logic": (
-        "Use every constraint and state the final solution unambiguously."
+        "Use every constraint. Check the solution against all conditions before giving the final answer."
     ),
     "codegen": (
         "Write correct, minimal, well-structured code that satisfies the specification. "
@@ -78,14 +78,14 @@ CATEGORY_PROMPTS = {
 
 
 TOKEN_BUDGETS = {
-    "factual": 260,
+    "factual": 360,
     "math": 650,
-    "sentiment": 140,
+    "sentiment": 180,
     "summary": 360,
-    "ner": 320,
+    "ner": 380,
     "debug": 900,
     "logic": 700,
-    "codegen": 1000,
+    "codegen": 1300,
 }
 
 
@@ -110,14 +110,14 @@ INSTRUCT_HINTS = ("instruct", "chat", "turbo", "assistant")
 
 
 CATEGORY_MODEL_HINTS = {
-    "codegen": ("coder", "code", "deepseek", "qwen", "llama", "mixtral", "gemma"),
-    "debug": ("coder", "code", "deepseek", "qwen", "llama", "mixtral", "gemma"),
-    "math": ("qwq", "reason", "r1", "deepseek", "qwen", "llama", "mixtral", "gemma"),
-    "logic": ("qwq", "reason", "r1", "deepseek", "qwen", "llama", "mixtral", "gemma"),
-    "summary": ("llama", "qwen", "mixtral", "deepseek", "gemma"),
-    "ner": ("llama", "qwen", "mixtral", "deepseek", "gemma"),
-    "sentiment": ("llama", "qwen", "mixtral", "deepseek", "gemma"),
-    "factual": ("llama", "qwen", "mixtral", "deepseek", "gemma"),
+    "codegen": ("coder", "code", "deepseek", "qwen", "kimi", "glm", "llama", "mixtral", "gemma"),
+    "debug": ("coder", "code", "deepseek", "qwen", "kimi", "glm", "llama", "mixtral", "gemma"),
+    "math": ("qwq", "reason", "r1", "deepseek", "qwen", "kimi", "glm", "llama", "mixtral", "gemma"),
+    "logic": ("qwq", "reason", "r1", "deepseek", "qwen", "kimi", "glm", "llama", "mixtral", "gemma"),
+    "summary": ("llama", "qwen", "kimi", "glm", "mixtral", "deepseek", "gemma"),
+    "ner": ("llama", "qwen", "kimi", "glm", "mixtral", "deepseek", "gemma"),
+    "sentiment": ("llama", "qwen", "kimi", "glm", "mixtral", "deepseek", "gemma"),
+    "factual": ("llama", "qwen", "kimi", "glm", "mixtral", "deepseek", "gemma"),
 }
 
 
@@ -131,20 +131,21 @@ def classify_task(prompt: str) -> str:
     if re.search(r"\b(named entit|ner|extract entities|extract .*entities|person|organization|organisation|location|date)\b", text):
         if any(word in text for word in ("extract", "identify", "label", "entities", "entity", "ner")):
             return "ner"
-    if re.search(r"\b(debug|bug|fix .*code|error in .*code|correct .*code|traceback|exception|failing test)\b", text):
+    if re.search(r"\b(debug|bug|fix .*code|error in .*code|correct .*code|traceback|exception|failing test|why .* fail|broken function)\b", text):
         return "debug"
-    if re.search(r"\b(write|implement|create|complete)\b.*\b(function|class|method|program|script|algorithm|code)\b", text):
+    if re.search(r"\b(write|implement|create|complete|define)\b.*\b(function|class|method|program|script|algorithm|code|regex|sql|query)\b", text):
         return "codegen"
     if re.search(
         r"\b(logic|deductive|constraint|puzzle|riddle|truth-teller|arrangement|satisfy all|"
-        r"each own|different pet|who owns|older than|younger than|left of|right of)\b",
+        r"each own|different pet|who owns|older than|younger than|left of|right of|"
+        r"knights?|knaves?|liar|truthful|which person|who is)\b",
         text,
     ):
         return "logic"
     if re.search(
         r"\b(calculate|compute|solve|arithmetic|percentage|percent|ratio|probability|"
         r"equation|projection|how many|how much|remain|remaining|left|sold|total|"
-        r"cost|price|discount|increase|decrease)\b",
+        r"cost|price|discount|increase|decrease|average|mean|median|speed|distance|rate)\b",
         text,
     ):
         return "math"
@@ -188,7 +189,7 @@ def model_size_score(model_id: str) -> int:
 
 def score_model(model_id: str, category: str) -> int:
     text = model_id.lower()
-    score = min(model_size_score(text), 800)
+    score = min(model_size_score(text), 900)
 
     if any(hint in text for hint in MODEL_EXCLUDE_HINTS):
         score -= 10_000
@@ -197,13 +198,17 @@ def score_model(model_id: str, category: str) -> int:
     if any(hint in text for hint in NON_CHAT_HINTS):
         score -= 700
 
-    category_bonus = 360 if category in {"codegen", "debug"} else 160
+    category_bonus = 720 if category in {"codegen", "debug"} else 220
     for rank, hint in enumerate(CATEGORY_MODEL_HINTS[category]):
         if hint in text:
             score += category_bonus - rank * 12
 
     if text.endswith("-instruct") or "instruct" in text:
         score += 120
+    if "coder" in text and category in {"codegen", "debug"}:
+        score += 500
+    if any(hint in text for hint in ("qwq", "r1", "reason")) and category in {"math", "logic"}:
+        score += 500
     if "small" in text or "tiny" in text or "mini" in text:
         score -= 80
 
@@ -211,7 +216,11 @@ def score_model(model_id: str, category: str) -> int:
 
 
 def ranked_models(allowed_models: list[str], category: str) -> list[str]:
-    return allowed_models
+    return sorted(
+        allowed_models,
+        key=lambda model: (score_model(model, category), -allowed_models.index(model)),
+        reverse=True,
+    )
 
 
 def read_tasks() -> list[dict[str, Any]]:
@@ -266,8 +275,10 @@ async def call_fireworks(
     response = await client.chat.completions.create(
         model=model,
         messages=[
+            {"role": "system", "content": profile.system_prompt},
             {"role": "user", "content": prompt},
         ],
+        max_tokens=profile.max_tokens,
         temperature=0.0,
     )
 
@@ -295,8 +306,10 @@ async def review_answer(
     response = await client.chat.completions.create(
         model=model,
         messages=[
+            {"role": "system", "content": profile.system_prompt},
             {"role": "user", "content": review_prompt},
         ],
+        max_tokens=profile.max_tokens,
         temperature=0.0,
     )
 
