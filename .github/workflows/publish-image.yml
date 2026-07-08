@@ -48,5 +48,8 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
+          provenance: false
+          sbom: false
           tags: |
             ${{ steps.image.outputs.image_name }}:latest
+            ${{ steps.image.outputs.image_name }}:amd64
