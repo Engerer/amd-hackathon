@@ -28,7 +28,7 @@ if INPUT_PATH == "/input/tasks.json" and not os.path.exists(INPUT_PATH) and os.p
 MAX_CONCURRENCY = min(max(int(os.getenv("MAX_CONCURRENCY", "8")), 1), 16)
 TASK_TIMEOUT_SECONDS = min(max(float(os.getenv("TASK_TIMEOUT_SECONDS", "28")), 10.0), 29.0)
 API_TIMEOUT_SECONDS = min(max(float(os.getenv("API_TIMEOUT_SECONDS", "24")), 8.0), 27.0)
-ENABLE_REVIEW_PASS = os.getenv("ENABLE_REVIEW_PASS", "0").strip().lower() in {"1", "true", "yes"}
+ENABLE_REVIEW_PASS = os.getenv("ENABLE_REVIEW_PASS", "1").strip().lower() not in {"0", "false", "no"}
 
 
 @dataclass(frozen=True)
@@ -38,7 +38,10 @@ class TaskProfile:
     max_tokens: int
 
 
-GLOBAL_SYSTEM_PROMPT = """Answer the user's task directly. Follow the requested format exactly."""
+GLOBAL_SYSTEM_PROMPT = """You are a precise general-purpose task solver.
+Follow the user's requested format exactly. Return only the requested answer unless the
+prompt asks for explanation. For code, return raw code without Markdown fences. Be concise
+and prioritize correctness."""
 
 
 CATEGORY_PROMPTS = {
@@ -267,6 +270,7 @@ async def call_fireworks(
     response = await client.chat.completions.create(
         model=model,
         messages=[
+            {"role": "system", "content": profile.system_prompt},
             {"role": "user", "content": prompt},
         ],
         max_tokens=profile.max_tokens,
@@ -297,6 +301,7 @@ async def review_answer(
     response = await client.chat.completions.create(
         model=model,
         messages=[
+            {"role": "system", "content": profile.system_prompt},
             {"role": "user", "content": review_prompt},
         ],
         max_tokens=profile.max_tokens,
@@ -371,7 +376,11 @@ def write_results(results: list[dict[str, Any]]) -> None:
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
     clean_results = [
-        {"task_id": result["task_id"], "answer": result["answer"]}
+        {
+            "task_id": result["task_id"],
+            "answer": result["answer"],
+            "response": result["answer"],
+        }
         for result in results
     ]
     tmp_path = f"{OUTPUT_PATH}.tmp"
