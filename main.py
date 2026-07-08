@@ -421,11 +421,18 @@ def score_model(model_id: str, category: str) -> int:
 
 
 def ranked_models(allowed_models: list[str], category: str) -> list[str]:
-    return sorted(
+    ranked = sorted(
         allowed_models,
         key=lambda model: (score_model(model, category), -allowed_models.index(model)),
         reverse=True,
     )
+    first_model = allowed_models[0]
+    if first_model in ranked[:3]:
+        return ranked
+    ranked = [model for model in ranked if model != first_model]
+    if ranked:
+        return [ranked[0], first_model, *ranked[1:]]
+    return [first_model]
 
 
 def read_tasks() -> list[dict[str, Any]]:
@@ -569,10 +576,13 @@ async def process_task(
     prompt = task_prompt(task)
     profile = build_profile(prompt)
     candidates = ranked_models(allowed_models, profile.category)
-    local = local_answer(prompt, profile.category)
-    if local:
-        logger.info("Processing task %s as %s using local solver", task_id, profile.category)
-        return {"task_id": task_id, "answer": local}
+    try:
+        local = local_answer(prompt, profile.category)
+        if local:
+            logger.info("Processing task %s as %s using local solver", task_id, profile.category)
+            return {"task_id": task_id, "answer": local}
+    except Exception as exc:
+        logger.warning("Task %s local solver failed, falling back to Fireworks: %s", task_id, exc)
 
     async with semaphore:
         logger.info("Processing task %s as %s using %s", task_id, profile.category, candidates[0])
@@ -590,40 +600,46 @@ async def process_task(
                     timeout=min(API_TIMEOUT_SECONDS, remaining),
                 )
 
-                if (
-                    ENABLE_CONSENSUS
-                    and profile.category in {"factual", "math", "summary", "ner", "debug", "logic", "codegen"}
-                    and len(candidates) > 1
-                ):
-                    remaining = deadline - asyncio.get_running_loop().time()
-                    if remaining > 15:
-                        second_model = next_usable_model(candidates[1:], model)
-                        if second_model != model:
-                            second_answer = await asyncio.wait_for(
-                                call_fireworks(client, second_model, profile, prompt),
-                                timeout=min(API_TIMEOUT_SECONDS, remaining),
-                            )
-                            remaining = deadline - asyncio.get_running_loop().time()
-                            if remaining > 8:
-                                answer = await asyncio.wait_for(
-                                    choose_best_answer(client, model, profile, prompt, answer, second_answer),
+                try:
+                    if (
+                        ENABLE_CONSENSUS
+                        and profile.category in {"factual", "math", "summary", "ner", "debug", "logic", "codegen"}
+                        and len(candidates) > 1
+                    ):
+                        remaining = deadline - asyncio.get_running_loop().time()
+                        if remaining > 15:
+                            second_model = next_usable_model(candidates[1:], model)
+                            if second_model != model:
+                                second_answer = await asyncio.wait_for(
+                                    call_fireworks(client, second_model, profile, prompt),
                                     timeout=min(API_TIMEOUT_SECONDS, remaining),
                                 )
+                                remaining = deadline - asyncio.get_running_loop().time()
+                                if remaining > 8:
+                                    answer = await asyncio.wait_for(
+                                        choose_best_answer(client, model, profile, prompt, answer, second_answer),
+                                        timeout=min(API_TIMEOUT_SECONDS, remaining),
+                                    )
+                except Exception as exc:
+                    logger.warning("Task %s consensus pass failed; keeping first answer: %s", task_id, exc)
 
-                if ENABLE_REVIEW_PASS and profile.category in {"math", "logic", "debug", "codegen"}:
-                    remaining = deadline - asyncio.get_running_loop().time()
-                    if remaining > 6:
-                        review_model = next_usable_model(candidates[1:], model)
-                        answer = await asyncio.wait_for(
-                            review_answer(client, review_model, profile, prompt, answer),
-                            timeout=min(API_TIMEOUT_SECONDS, remaining),
-                        )
+                try:
+                    if ENABLE_REVIEW_PASS and profile.category in {"math", "logic", "debug", "codegen"}:
+                        remaining = deadline - asyncio.get_running_loop().time()
+                        if remaining > 6:
+                            review_model = next_usable_model(candidates[1:], model)
+                            answer = await asyncio.wait_for(
+                                review_answer(client, review_model, profile, prompt, answer),
+                                timeout=min(API_TIMEOUT_SECONDS, remaining),
+                            )
+                except Exception as exc:
+                    logger.warning("Task %s review pass failed; keeping current answer: %s", task_id, exc)
 
                 return {
                     "task_id": task_id,
                     "answer": answer,
                 }
-            except (APIConnectionError, APITimeoutError, RateLimitError, APIError, asyncio.TimeoutError, RuntimeError) as exc:
+            except (APIConnectionError, APITimeoutError, RateLimitError, APIError, asyncio.TimeoutError, RuntimeError, Exception) as exc:
                 last_error = exc
                 logger.warning(
                     "Task %s attempt %s with model %s failed: %s",
@@ -677,12 +693,17 @@ async def run() -> int:
 
     logger.info("Loaded %d tasks. Allowed models: %s", len(tasks), ", ".join(allowed_models))
     results = await asyncio.gather(
-        *(process_task(client, allowed_models, task, semaphore) for task in tasks)
+        *(process_task(client, allowed_models, task, semaphore) for task in tasks),
+        return_exceptions=True,
     )
-    failed_count = sum(1 for result in results if result.get("_failed"))
-    if failed_count == len(results):
-        logger.error("All tasks failed API/model calls; refusing to submit all fallback answers.")
-        return 1
+    safe_results: list[dict[str, Any]] = []
+    for task, result in zip(tasks, results):
+        if isinstance(result, Exception):
+            logger.error("Task %s crashed unexpectedly: %s", task.get("task_id"), result)
+            safe_results.append({"task_id": task["task_id"], "answer": "I don't know.", "_failed": True})
+        else:
+            safe_results.append(result)
+    results = safe_results
 
     try:
         write_results(results)
