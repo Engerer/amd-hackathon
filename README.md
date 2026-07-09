@@ -18,10 +18,9 @@ base URL supplied by the judging harness, and writes `/output/results.json`.
 ## Runtime Strategy
 
 - Uses zero-token regex routing with code-snippet detection for the 8 Track 1 categories.
-- Prefers `minimax-m3` for factual, sentiment, summarisation, NER, math, and logic prompts, sending `reasoning_effort="none"` to reduce hidden reasoning tokens.
+- Prefers `gemma-4-31b-it` for factual, sentiment, summarisation, and NER prompts.
+- Prefers `minimax-m3` for math and logic, sending `reasoning_effort="none"` to reduce hidden reasoning tokens.
 - Prefers `kimi-k2p7-code` for debugging and code generation.
-- Uses deterministic `temperature=0.0` for factual, math, sentiment, NER, and logic; uses `temperature=0.2` for summary, debug, and code generation.
-- Does not send `top_p`, `top_k`, or model thinking controls.
 - Writes `/output/inference_log.json` with per-call usage when the API returns token metadata.
 - Keeps local deterministic solvers enabled by default for simple arithmetic, sentiment, code, and logic cases; set `ENABLE_LOCAL_SOLVERS=0` to force Fireworks calls during testing.
 
