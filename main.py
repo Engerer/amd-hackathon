@@ -96,6 +96,17 @@ TOKEN_BUDGETS = {
     "codegen": 700,
 }
 
+TEMPERATURE_BY_CATEGORY = {
+    "factual": 0.0,
+    "math": 0.0,
+    "sentiment": 0.0,
+    "summary": 0.2,
+    "ner": 0.0,
+    "debug": 0.2,
+    "logic": 0.0,
+    "codegen": 0.2,
+}
+
 
 MODEL_EXCLUDE_HINTS = (
     "audio",
@@ -115,17 +126,18 @@ MODEL_EXCLUDE_HINTS = (
 
 NON_CHAT_HINTS = ("base", "preview")
 INSTRUCT_HINTS = ("instruct", "chat", "turbo", "assistant")
+NON_CODE_CATEGORIES = {"factual", "math", "sentiment", "summary", "ner", "logic"}
 
 
 CATEGORY_MODEL_HINTS = {
     "codegen": ("coder", "code", "deepseek", "qwen", "kimi", "glm", "llama", "mixtral", "gemma"),
     "debug": ("coder", "code", "deepseek", "qwen", "kimi", "glm", "llama", "mixtral", "gemma"),
-    "math": ("minimax", "m3", "qwq", "reason", "r1", "deepseek", "qwen", "kimi", "glm", "llama", "mixtral", "gemma"),
-    "logic": ("minimax", "m3", "qwq", "reason", "r1", "deepseek", "qwen", "kimi", "glm", "llama", "mixtral", "gemma"),
-    "summary": ("llama", "qwen", "kimi", "glm", "mixtral", "deepseek", "gemma"),
-    "ner": ("llama", "qwen", "kimi", "glm", "mixtral", "deepseek", "gemma"),
-    "sentiment": ("llama", "qwen", "kimi", "glm", "mixtral", "deepseek", "gemma"),
-    "factual": ("llama", "qwen", "kimi", "glm", "mixtral", "deepseek", "gemma"),
+    "math": ("minimax", "m3", "kimi", "qwq", "reason", "r1", "deepseek", "qwen", "glm", "llama", "mixtral", "gemma"),
+    "logic": ("minimax", "m3", "kimi", "qwq", "reason", "r1", "deepseek", "qwen", "glm", "llama", "mixtral", "gemma"),
+    "summary": ("minimax", "m3", "kimi", "llama", "qwen", "glm", "mixtral", "deepseek", "gemma"),
+    "ner": ("minimax", "m3", "kimi", "llama", "qwen", "glm", "mixtral", "deepseek", "gemma"),
+    "sentiment": ("minimax", "m3", "kimi", "llama", "qwen", "glm", "mixtral", "deepseek", "gemma"),
+    "factual": ("minimax", "m3", "kimi", "llama", "qwen", "glm", "mixtral", "deepseek", "gemma"),
 }
 
 
@@ -534,10 +546,10 @@ def score_model(model_id: str, category: str) -> int:
         score += 120
     if "kimi" in text and category in {"codegen", "debug"}:
         score += 600
-    if ("minimax" in text or "m3" in text) and category in {"math", "logic"}:
-        score += 600
-    if "gemma-4-31b" in text and category in {"factual", "sentiment", "summary", "ner"}:
-        score += 250
+    if ("minimax" in text or "m3" in text) and category in NON_CODE_CATEGORIES:
+        score += 650
+    if "kimi" in text and category in NON_CODE_CATEGORIES:
+        score += 260
     if "coder" in text and category in {"codegen", "debug"}:
         score += 500
     if any(hint in text for hint in ("qwq", "r1", "reason")) and category in {"math", "logic"}:
@@ -648,12 +660,13 @@ async def create_chat_completion(
     model: str,
     messages: list[dict[str, str]],
     max_tokens: int,
+    category: str,
 ) -> Any:
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "max_tokens": max_tokens,
-        "temperature": 0.0,
+        "temperature": TEMPERATURE_BY_CATEGORY.get(category, 0.0),
     }
     if (
         DEFAULT_REASONING_EFFORT
@@ -702,6 +715,7 @@ async def call_fireworks(
             {"role": "user", "content": prompt},
         ],
         max_tokens=profile.max_tokens,
+        category=profile.category,
     )
     record_usage(task_id, profile.category, stage, model, response)
 
@@ -735,6 +749,7 @@ async def review_answer(
             {"role": "user", "content": review_prompt},
         ],
         max_tokens=profile.max_tokens,
+        category=profile.category,
     )
     record_usage(task_id, profile.category, "review", model, response)
 
@@ -773,6 +788,7 @@ async def choose_best_answer(
             {"role": "user", "content": chooser_prompt},
         ],
         max_tokens=profile.max_tokens,
+        category=profile.category,
     )
     record_usage(task_id, profile.category, "consensus_choose", model, response)
     answer = response.choices[0].message.content
