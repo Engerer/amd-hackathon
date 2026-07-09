@@ -15,6 +15,15 @@ base URL supplied by the judging harness, and writes `/output/results.json`.
 - Does not bundle or call local models.
 - Builds a small `linux/amd64` Docker image through GitHub Actions.
 
+## Runtime Strategy
+
+- Uses zero-token regex routing with code-snippet detection for the 8 Track 1 categories.
+- Prefers `gemma-4-31b-it` for factual, sentiment, summarisation, and NER prompts.
+- Prefers `minimax-m3` for math and logic, sending `reasoning_effort="none"` to reduce hidden reasoning tokens.
+- Prefers `kimi-k2p7-code` for debugging and code generation.
+- Writes `/output/inference_log.json` with per-call usage when the API returns token metadata.
+- Keeps local deterministic solvers enabled by default for simple arithmetic, sentiment, code, and logic cases; set `ENABLE_LOCAL_SOLVERS=0` to force Fireworks calls during testing.
+
 ## Local Contract Test
 
 Install dependencies and run the mock Fireworks harness:
@@ -25,7 +34,8 @@ python test_agent.py
 ```
 
 The test writes sample tasks, starts a local mock Fireworks API, runs `main.py`,
-and verifies that every task produced a non-empty answer through an allowed model.
+and verifies that every task produced a non-empty answer through an allowed model,
+with the expected category-specific routing.
 
 ## Build Locally
 

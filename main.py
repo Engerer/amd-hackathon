@@ -32,6 +32,11 @@ API_TIMEOUT_SECONDS = min(max(float(os.getenv("API_TIMEOUT_SECONDS", "42")), 10.
 ENABLE_LOCAL_SOLVERS = os.getenv("ENABLE_LOCAL_SOLVERS", "1").strip().lower() not in {"0", "false", "no"}
 ENABLE_REVIEW_PASS = os.getenv("ENABLE_REVIEW_PASS", "1").strip().lower() not in {"0", "false", "no"}
 ENABLE_CONSENSUS = os.getenv("ENABLE_CONSENSUS", "1").strip().lower() not in {"0", "false", "no"}
+DEFAULT_REASONING_EFFORT = os.getenv("REASONING_EFFORT", "none")
+REASONING_MODEL_HINTS = ("minimax", "m3")
+NO_REASONING_EFFORT_MODELS: set[str] = set()
+USAGE_TOTALS = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
+CALL_LOG: list[dict[str, Any]] = []
 
 
 @dataclass(frozen=True)
@@ -41,10 +46,10 @@ class TaskProfile:
     max_tokens: int
 
 
-GLOBAL_SYSTEM_PROMPT = """You are a precise general-purpose task solver.
-Follow the user's requested format exactly. Return only the requested answer unless the
-prompt asks for explanation. For code, return raw code without Markdown fences. Be concise
-and prioritize correctness."""
+GLOBAL_SYSTEM_PROMPT = (
+    "English only. Be concise; no preamble. Follow the requested format exactly. "
+    "For code, return raw code unless Markdown is explicitly requested. Prioritize correctness."
+)
 
 
 CATEGORY_PROMPTS = {
@@ -81,14 +86,14 @@ CATEGORY_PROMPTS = {
 
 
 TOKEN_BUDGETS = {
-    "factual": 360,
-    "math": 650,
-    "sentiment": 180,
-    "summary": 360,
-    "ner": 380,
-    "debug": 900,
-    "logic": 700,
-    "codegen": 1300,
+    "factual": 220,
+    "math": 420,
+    "sentiment": 120,
+    "summary": 220,
+    "ner": 260,
+    "debug": 650,
+    "logic": 420,
+    "codegen": 700,
 }
 
 
@@ -115,8 +120,8 @@ INSTRUCT_HINTS = ("instruct", "chat", "turbo", "assistant")
 CATEGORY_MODEL_HINTS = {
     "codegen": ("coder", "code", "deepseek", "qwen", "kimi", "glm", "llama", "mixtral", "gemma"),
     "debug": ("coder", "code", "deepseek", "qwen", "kimi", "glm", "llama", "mixtral", "gemma"),
-    "math": ("qwq", "reason", "r1", "deepseek", "qwen", "kimi", "glm", "llama", "mixtral", "gemma"),
-    "logic": ("qwq", "reason", "r1", "deepseek", "qwen", "kimi", "glm", "llama", "mixtral", "gemma"),
+    "math": ("minimax", "m3", "qwq", "reason", "r1", "deepseek", "qwen", "kimi", "glm", "llama", "mixtral", "gemma"),
+    "logic": ("minimax", "m3", "qwq", "reason", "r1", "deepseek", "qwen", "kimi", "glm", "llama", "mixtral", "gemma"),
     "summary": ("llama", "qwen", "kimi", "glm", "mixtral", "deepseek", "gemma"),
     "ner": ("llama", "qwen", "kimi", "glm", "mixtral", "deepseek", "gemma"),
     "sentiment": ("llama", "qwen", "kimi", "glm", "mixtral", "deepseek", "gemma"),
@@ -124,37 +129,154 @@ CATEGORY_MODEL_HINTS = {
 }
 
 
-def classify_task(prompt: str) -> str:
-    text = prompt.lower()
+CODE_FENCE_RE = re.compile(r"```")
+CODE_HINT_RE = re.compile(
+    r"\b(def |class |function |return |import |from |#include|public |private |void |"
+    r"console\.log|printf|System\.out|=>|;\s*$)",
+    re.MULTILINE,
+)
 
-    if re.search(r"\bwhat\s+is\s+[-(]*\d", text):
-        return "math"
-    if re.search(r"\b(sentiment|positive|negative|neutral|mixed|attitude|tone)\b", text):
-        return "sentiment"
-    if re.search(r"\b(summarize|summarise|summary|condense|shorten|tl;dr|one sentence)\b", text):
-        return "summary"
-    if re.search(r"\b(named entit|ner|extract entities|extract .*entities|person|organization|organisation|location|date)\b", text):
-        if any(word in text for word in ("extract", "identify", "label", "entities", "entity", "ner")):
-            return "ner"
-    if re.search(r"\b(debug|bug|fix .*code|error in .*code|correct .*code|traceback|exception|failing test|why .* fail|broken function)\b", text):
-        return "debug"
-    if re.search(r"\b(write|implement|create|complete|define)\b.*\b(function|class|method|program|script|algorithm|code|regex|sql|query)\b", text):
-        return "codegen"
-    if re.search(
-        r"\b(logic|deductive|constraint|puzzle|riddle|truth-teller|arrangement|satisfy all|"
-        r"each own|different pet|who owns|older than|younger than|left of|right of|"
-        r"knights?|knaves?|liar|truthful|which person|who is)\b",
-        text,
-    ):
-        return "logic"
-    if re.search(
-        r"\b(calculate|compute|solve|arithmetic|percentage|percent|ratio|probability|"
-        r"equation|projection|how many|how much|remain|remaining|left|sold|total|"
-        r"cost|price|discount|increase|decrease|average|mean|median|speed|distance|rate)\b",
-        text,
-    ):
-        return "math"
-    return "factual"
+CATEGORY_PATTERNS = {
+    "sentiment": [
+        r"\bsentiment\b",
+        r"\bpositive or negative\b",
+        r"\bpositive, negative\b",
+        r"\bclassify the (tone|emotion|sentiment)\b",
+        r"\bis this (review|tweet|comment)\b",
+        r"\bemotional tone\b",
+        r"\btone of (this|the|that)\b",
+        r"\b(mood|emotion|attitude) of (this|the|that)\b",
+        r"\b(happy|upset|angry|sad) or\b",
+        r"\brate the (mood|tone|sentiment)\b",
+    ],
+    "summary": [
+        r"\bsummari[sz]e\b",
+        r"\bsummary\b",
+        r"\btl;?dr\b",
+        r"\bcondense\b",
+        r"\bin (one|a single|two|three) sentences?\b",
+        r"\bin \d+ words?\b",
+        r"\bshorten\b",
+        r"\bkey points\b",
+        r"\bthe gist\b",
+        r"\bboil .* down\b",
+        r"\bmain (idea|point|takeaway)\b",
+        r"\bin a (single|one) line\b",
+    ],
+    "ner": [
+        r"\bnamed entit",
+        r"\bextract (all )?(the )?(entit|name|person|people|organi|location|date)",
+        r"\blist (all )?(the )?(people|organi[sz]ations?|locations?|dates?)\b",
+        r"\bidentify (the )?(person|people|organi|location|date|entit)",
+        r"\b(person|org|organization|organisation|location|date)\s*[:=]",
+        r"\b(mentioned|named) in (this|the|below)\b",
+        r"\bpull out (every|all|the)\b",
+        r"\b(company|people|place|person) names?\b",
+        r"\bwho and what (places|locations|organizations|organisations|companies)\b",
+    ],
+    "debug": [
+        r"\b(fix|debug|find the bug|what'?s wrong|why (does|is)n'?t|error in)\b.*\b(code|function|program|snippet)\b",
+        r"\bbug\b",
+        r"\bdebug\b",
+        r"\bfix (this|the|my) (code|function|snippet|program)\b",
+        r"\bwhy (does|is)n'?t (this|it|my)\b",
+        r"\bcorrect(ed)? (version|implementation)\b",
+        r"\btraceback\b",
+        r"\bstack ?trace\b",
+        r"\bthrows? an? (error|exception)\b",
+        r"\bwhat (did i do wrong|went wrong)\b",
+        r"\b(runs?|loops?) forever\b",
+        r"\binfinite loop\b",
+        r"\breturns? \w+ instead\b",
+        r"\bfailing test\b",
+        r"\bbroken function\b",
+    ],
+    "codegen": [
+        r"\b(write|create|produce|build|give me|need|implement|complete|define) (a|an|me a|the)?\s?(\w+\s)?(function|program|script|method|class|routine|algorithm)\b",
+        r"\bimplement (a |an |the )?\w+",
+        r"\bgenerate (code|a function)\b",
+        r"\bcode that\b",
+        r"\bfunction (that|to)\b",
+        r"\bscript (that|to)\b",
+        r"\bmethod (that|to)\b",
+        r"\b(sql|regex) (query|pattern)\b",
+    ],
+    "logic": [
+        r"\blogic\b",
+        r"\bpuzzle\b",
+        r"\bdeductive\b",
+        r"\bconstraints?\b",
+        r"\briddle\b",
+        r"\btruth-teller\b",
+        r"\bknights?\b",
+        r"\bknaves?\b",
+        r"\bexactly one\b",
+        r"\bat least one\b",
+        r"\bwho (is|owns|sits|lives|has|drinks)\b",
+        r"\bolder than\b",
+        r"\byounger than\b",
+        r"\bleft of\b",
+        r"\bright of\b",
+        r"\beach (person|house|box|day)\b.*\b(exactly|only|one|different)\b",
+        r"\b(definitely|necessarily) (true|follows?|a)\b",
+    ],
+    "math": [
+        r"\bcalculate\b",
+        r"\bcompute\b",
+        r"\bsolve\b",
+        r"\barithmetic\b",
+        r"\bpercentage\b",
+        r"\bpercent\b",
+        r"\b\d+\s*%",
+        r"\bsum of\b",
+        r"\baverage\b",
+        r"\bprojection\b",
+        r"\bprobability\b",
+        r"\bequation\b",
+        r"\bhow (much|many)\b",
+        r"\bwhat is \d",
+        r"\b\d+\s*[+\-*/x]\s*\d+",
+        r"\btotal (cost|price|amount)\b",
+        r"\bround(ed)?\b",
+        r"\bdecimal (place|point)\b",
+        r"\bratio\b",
+        r"\b\d+\s*:\s*\d+",
+        r"\b(interest|discount|increase|decrease)\b",
+        r"\bfind the (largest|smallest|value|angle|area|sum|total)\b",
+    ],
+    "factual": [
+        r"\bwhat is\b",
+        r"\bwhat are\b",
+        r"\bwho (was|were)\b",
+        r"\bwhen (did|was)\b",
+        r"\bwhere (is|was)\b",
+        r"\bwhy (is|do|does)\b",
+        r"\bhow (do|does)\b",
+        r"\bexplain\b",
+        r"\bdefine\b",
+        r"\bdescribe\b",
+        r"\bwhat does .* mean\b",
+        r"\btell me (about|the difference)\b",
+    ],
+}
+
+CATEGORY_PRIORITY = ["debug", "codegen", "sentiment", "ner", "summary", "logic", "math", "factual"]
+COMPILED_PATTERNS = {
+    category: [re.compile(pattern, re.IGNORECASE) for pattern in patterns]
+    for category, patterns in CATEGORY_PATTERNS.items()
+}
+
+
+def has_code(prompt: str) -> bool:
+    return bool(CODE_FENCE_RE.search(prompt) or CODE_HINT_RE.search(prompt))
+
+
+def classify_task(prompt: str) -> str:
+    text = prompt or ""
+    for category in CATEGORY_PRIORITY:
+        if any(regex.search(text) for regex in COMPILED_PATTERNS[category]):
+            return category
+    return "debug" if has_code(text) else "factual"
 
 
 def build_profile(prompt: str) -> TaskProfile:
@@ -410,6 +532,12 @@ def score_model(model_id: str, category: str) -> int:
 
     if text.endswith("-instruct") or "instruct" in text:
         score += 120
+    if "kimi" in text and category in {"codegen", "debug"}:
+        score += 600
+    if ("minimax" in text or "m3" in text) and category in {"math", "logic"}:
+        score += 600
+    if "gemma-4-31b" in text and category in {"factual", "sentiment", "summary", "ner"}:
+        score += 250
     if "coder" in text and category in {"codegen", "debug"}:
         score += 500
     if any(hint in text for hint in ("qwq", "r1", "reason")) and category in {"math", "logic"}:
@@ -478,21 +606,104 @@ def next_usable_model(candidates: list[str], fallback: str) -> str:
     return fallback
 
 
+def usage_value(usage: Any, name: str) -> int:
+    return int(getattr(usage, name, 0) or 0)
+
+
+def record_usage(task_id: Any, category: str, stage: str, model: str, response: Any) -> None:
+    usage = getattr(response, "usage", None)
+    prompt_tokens = usage_value(usage, "prompt_tokens") if usage else 0
+    completion_tokens = usage_value(usage, "completion_tokens") if usage else 0
+    total_tokens = usage_value(usage, "total_tokens") if usage else 0
+
+    USAGE_TOTALS["prompt_tokens"] += prompt_tokens
+    USAGE_TOTALS["completion_tokens"] += completion_tokens
+    USAGE_TOTALS["total_tokens"] += total_tokens
+    USAGE_TOTALS["calls"] += 1
+    CALL_LOG.append({
+        "task_id": task_id,
+        "category": category,
+        "stage": stage,
+        "model": model,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+    })
+
+
+def reasoning_param_rejected(error: Exception) -> bool:
+    text = str(error).lower()
+    return "reasoning_effort" in text or ("reasoning" in text and ("invalid" in text or "unsupported" in text))
+
+
+def should_send_reasoning_effort(model: str) -> bool:
+    if os.getenv("REASONING_EFFORT_ALL", "").strip().lower() in {"1", "true", "yes"}:
+        return True
+    model_lower = model.lower()
+    return any(hint in model_lower for hint in REASONING_MODEL_HINTS)
+
+
+async def create_chat_completion(
+    client: AsyncOpenAI,
+    model: str,
+    messages: list[dict[str, str]],
+    max_tokens: int,
+) -> Any:
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": 0.0,
+    }
+    if (
+        DEFAULT_REASONING_EFFORT
+        and model not in NO_REASONING_EFFORT_MODELS
+        and should_send_reasoning_effort(model)
+    ):
+        kwargs["reasoning_effort"] = DEFAULT_REASONING_EFFORT
+
+    try:
+        return await client.chat.completions.create(**kwargs)
+    except APIError as exc:
+        if "reasoning_effort" in kwargs and reasoning_param_rejected(exc):
+            NO_REASONING_EFFORT_MODELS.add(model)
+            logger.info("Model %s rejected reasoning_effort; retrying without it.", model)
+            kwargs.pop("reasoning_effort", None)
+            return await client.chat.completions.create(**kwargs)
+        raise
+
+
+def write_inference_log() -> None:
+    output_dir = os.path.dirname(OUTPUT_PATH)
+    log_path = os.path.join(output_dir or ".", "inference_log.json")
+    payload = {
+        "calls": CALL_LOG,
+        "totals": dict(USAGE_TOTALS),
+        "reasoning_effort": DEFAULT_REASONING_EFFORT,
+        "models_without_reasoning_effort": sorted(NO_REASONING_EFFORT_MODELS),
+    }
+    with open(log_path, "w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, separators=(",", ":"))
+
+
 async def call_fireworks(
     client: AsyncOpenAI,
     model: str,
     profile: TaskProfile,
     prompt: str,
+    task_id: Any,
+    stage: str,
 ) -> str:
-    response = await client.chat.completions.create(
+    response = await create_chat_completion(
+        client=client,
         model=model,
         messages=[
             {"role": "system", "content": profile.system_prompt},
             {"role": "user", "content": prompt},
         ],
         max_tokens=profile.max_tokens,
-        temperature=0.0,
     )
+    record_usage(task_id, profile.category, stage, model, response)
 
     answer = response.choices[0].message.content
     if not answer or not answer.strip():
@@ -506,6 +717,7 @@ async def review_answer(
     profile: TaskProfile,
     prompt: str,
     draft_answer: str,
+    task_id: Any,
 ) -> str:
     review_prompt = (
         "Original task:\n"
@@ -515,15 +727,16 @@ async def review_answer(
         "Return the best final answer for the original task. Fix mistakes if present. "
         "Follow the original requested format exactly. Return only the final answer."
     )
-    response = await client.chat.completions.create(
+    response = await create_chat_completion(
+        client=client,
         model=model,
         messages=[
             {"role": "system", "content": profile.system_prompt},
             {"role": "user", "content": review_prompt},
         ],
         max_tokens=profile.max_tokens,
-        temperature=0.0,
     )
+    record_usage(task_id, profile.category, "review", model, response)
 
     answer = response.choices[0].message.content
     if not answer or not answer.strip():
@@ -538,6 +751,7 @@ async def choose_best_answer(
     prompt: str,
     first_answer: str,
     second_answer: str,
+    task_id: Any,
 ) -> str:
     if first_answer.strip() == second_answer.strip():
         return first_answer
@@ -551,15 +765,16 @@ async def choose_best_answer(
         "Choose the better final answer for the original task. If both are partly wrong, "
         "correct them. Follow the original requested format exactly. Return only the final answer."
     )
-    response = await client.chat.completions.create(
+    response = await create_chat_completion(
+        client=client,
         model=model,
         messages=[
             {"role": "system", "content": profile.system_prompt},
             {"role": "user", "content": chooser_prompt},
         ],
         max_tokens=profile.max_tokens,
-        temperature=0.0,
     )
+    record_usage(task_id, profile.category, "consensus_choose", model, response)
     answer = response.choices[0].message.content
     if not answer or not answer.strip():
         return first_answer
@@ -596,7 +811,7 @@ async def process_task(
 
             try:
                 answer = await asyncio.wait_for(
-                    call_fireworks(client, model, profile, prompt),
+                    call_fireworks(client, model, profile, prompt, task_id, "primary"),
                     timeout=min(API_TIMEOUT_SECONDS, remaining),
                 )
 
@@ -611,13 +826,13 @@ async def process_task(
                             second_model = next_usable_model(candidates[1:], model)
                             if second_model != model:
                                 second_answer = await asyncio.wait_for(
-                                    call_fireworks(client, second_model, profile, prompt),
+                                    call_fireworks(client, second_model, profile, prompt, task_id, "consensus_candidate"),
                                     timeout=min(API_TIMEOUT_SECONDS, remaining),
                                 )
                                 remaining = deadline - asyncio.get_running_loop().time()
                                 if remaining > 8:
                                     answer = await asyncio.wait_for(
-                                        choose_best_answer(client, model, profile, prompt, answer, second_answer),
+                                        choose_best_answer(client, model, profile, prompt, answer, second_answer, task_id),
                                         timeout=min(API_TIMEOUT_SECONDS, remaining),
                                     )
                 except Exception as exc:
@@ -629,7 +844,7 @@ async def process_task(
                         if remaining > 6:
                             review_model = next_usable_model(candidates[1:], model)
                             answer = await asyncio.wait_for(
-                                review_answer(client, review_model, profile, prompt, answer),
+                                review_answer(client, review_model, profile, prompt, answer, task_id),
                                 timeout=min(API_TIMEOUT_SECONDS, remaining),
                             )
                 except Exception as exc:
@@ -707,11 +922,20 @@ async def run() -> int:
 
     try:
         write_results(results)
+        write_inference_log()
     except Exception as exc:
-        logger.error("Failed to write %s: %s", OUTPUT_PATH, exc)
+        logger.error("Failed to write outputs near %s: %s", OUTPUT_PATH, exc)
         return 1
 
-    logger.info("Wrote %d results to %s", len(results), OUTPUT_PATH)
+    logger.info(
+        "Wrote %d results to %s | tokens: total=%d prompt=%d completion=%d calls=%d",
+        len(results),
+        OUTPUT_PATH,
+        USAGE_TOTALS["total_tokens"],
+        USAGE_TOTALS["prompt_tokens"],
+        USAGE_TOTALS["completion_tokens"],
+        USAGE_TOTALS["calls"],
+    )
     return 0
 
 

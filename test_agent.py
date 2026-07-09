@@ -11,8 +11,11 @@ from tempfile import TemporaryDirectory
 
 CALLS = []
 ALLOWED_MODELS = [
-    "accounts/fireworks/models/llama-v3p3-70b-instruct",
-    "accounts/fireworks/models/qwen2p5-coder-32b-instruct",
+    "minimax-m3",
+    "kimi-k2p7-code",
+    "gemma-4-31b-it",
+    "gemma-4-26b-a4b-it",
+    "gemma-4-31b-it-nvfp4",
 ]
 
 
@@ -80,7 +83,25 @@ def main():
         {"task_id": "debug", "prompt": "Fix the bug in this Python code: def add(a,b): return a-b"},
         {"task_id": "logic", "prompt": "Solve this logic puzzle: Ana is older than Bo. Bo is older than Cy. Who is youngest?"},
         {"task_id": "codegen", "prompt": "Write a Python function is_even(n) that returns True for even integers."},
+        {"task_id": "summary_indirect", "prompt": "Boil the following report down to its three main takeaways."},
+        {"task_id": "ner_indirect", "prompt": "Who and what places are mentioned in this news snippet?"},
+        {"task_id": "debug_indirect", "prompt": "This loop runs forever. Can you tell me why?\nwhile x > 0:\n    y += 1"},
+        {"task_id": "math_ratio", "prompt": "The angles of a triangle are in ratio 2:3:4. Find the largest angle."},
     ]
+    expected_model_by_task_id = {
+        101: "gemma-4-31b-it",
+        "math": "minimax-m3",
+        "sentiment": "gemma-4-31b-it",
+        "summary": "gemma-4-31b-it",
+        "ner": "gemma-4-31b-it",
+        "debug": "kimi-k2p7-code",
+        "logic": "minimax-m3",
+        "codegen": "kimi-k2p7-code",
+        "summary_indirect": "gemma-4-31b-it",
+        "ner_indirect": "gemma-4-31b-it",
+        "debug_indirect": "kimi-k2p7-code",
+        "math_ratio": "minimax-m3",
+    }
 
     port = 8000
     thread = threading.Thread(target=run_mock_server, args=(port,), daemon=True)
@@ -105,6 +126,9 @@ def main():
         env["MAX_CONCURRENCY"] = "4"
         env["INPUT_PATH"] = str(input_path)
         env["OUTPUT_PATH"] = str(results_path)
+        env["ENABLE_LOCAL_SOLVERS"] = "0"
+        env["ENABLE_CONSENSUS"] = "0"
+        env["ENABLE_REVIEW_PASS"] = "0"
 
         result = subprocess.run([sys.executable, "main.py"], env=env, capture_output=True, text=True)
         print("--- stdout ---")
@@ -129,9 +153,31 @@ def main():
             raise SystemExit(f"unexpected Fireworks call count: {len(CALLS)}")
         if any(call["model"] not in ALLOWED_MODELS for call in CALLS):
             raise SystemExit("agent called a model outside ALLOWED_MODELS")
+        calls_by_prompt = {
+            next((m.get("content", "") for m in call["messages"] if m.get("role") == "user"), ""): call
+            for call in CALLS
+        }
+        for task in tasks:
+            call = calls_by_prompt.get(task["prompt"])
+            if not call:
+                raise SystemExit(f"missing Fireworks call for task {task['task_id']}")
+            expected_model = expected_model_by_task_id[task["task_id"]]
+            if call["model"] != expected_model:
+                raise SystemExit(f"task {task['task_id']} expected {expected_model}, saw {call['model']}")
+            if call["model"] == "minimax-m3" and call.get("reasoning_effort") != "none":
+                raise SystemExit(f"minimax call for task {task['task_id']} did not send reasoning_effort=none")
+            if call["model"] != "minimax-m3" and "reasoning_effort" in call:
+                raise SystemExit(f"non-MiniMax call for task {task['task_id']} sent reasoning_effort")
         numeric_result = next(item for item in output if item["task_id"] == 101)
         if not isinstance(numeric_result["task_id"], int):
             raise SystemExit("numeric task_id was not preserved")
+
+        inference_log_path = output_dir / "inference_log.json"
+        if not inference_log_path.exists():
+            raise SystemExit("inference_log.json was not created")
+        inference_log = json.loads(inference_log_path.read_text(encoding="utf-8"))
+        if inference_log.get("totals", {}).get("calls") != len(tasks):
+            raise SystemExit("inference log call count did not match task count")
 
     print("SUCCESS: Track 1 contract test passed.")
 
