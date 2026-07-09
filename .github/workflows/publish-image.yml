@@ -61,4 +61,6 @@ jobs:
             ${{ steps.image.outputs.image_name }}:t1-accuracy-v2
             ${{ steps.image.outputs.image_name }}:t1-accuracy-v3
             ${{ steps.image.outputs.image_name }}:t1-accuracy-v3-safe
+            ${{ steps.image.outputs.image_name }}:t1-accuracy-v4
+            ${{ steps.image.outputs.image_name }}:t1-80-v1
             ${{ steps.image.outputs.image_name }}:t1-${{ github.sha }}

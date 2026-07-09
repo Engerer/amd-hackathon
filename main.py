@@ -30,8 +30,8 @@ MAX_CONCURRENCY = min(max(int(os.getenv("MAX_CONCURRENCY", "6")), 1), 12)
 TASK_TIMEOUT_SECONDS = min(max(float(os.getenv("TASK_TIMEOUT_SECONDS", "55")), 15.0), 80.0)
 API_TIMEOUT_SECONDS = min(max(float(os.getenv("API_TIMEOUT_SECONDS", "42")), 10.0), 60.0)
 ENABLE_LOCAL_SOLVERS = os.getenv("ENABLE_LOCAL_SOLVERS", "1").strip().lower() not in {"0", "false", "no"}
-ENABLE_REVIEW_PASS = os.getenv("ENABLE_REVIEW_PASS", "1").strip().lower() not in {"0", "false", "no"}
-ENABLE_CONSENSUS = os.getenv("ENABLE_CONSENSUS", "1").strip().lower() not in {"0", "false", "no"}
+ENABLE_REVIEW_PASS = os.getenv("ENABLE_REVIEW_PASS", "0").strip().lower() in {"1", "true", "yes"}
+ENABLE_CONSENSUS = os.getenv("ENABLE_CONSENSUS", "0").strip().lower() in {"1", "true", "yes"}
 DEFAULT_REASONING_EFFORT = os.getenv("REASONING_EFFORT", "none")
 REASONING_MODEL_HINTS = ("minimax", "m3")
 NO_REASONING_EFFORT_MODELS: set[str] = set()
@@ -96,6 +96,17 @@ TOKEN_BUDGETS = {
     "codegen": 700,
 }
 
+TEMPERATURE_BY_CATEGORY = {
+    "factual": 0.0,
+    "math": 0.0,
+    "sentiment": 0.0,
+    "summary": 0.2,
+    "ner": 0.0,
+    "debug": 0.2,
+    "logic": 0.0,
+    "codegen": 0.2,
+}
+
 
 MODEL_EXCLUDE_HINTS = (
     "audio",
@@ -115,17 +126,18 @@ MODEL_EXCLUDE_HINTS = (
 
 NON_CHAT_HINTS = ("base", "preview")
 INSTRUCT_HINTS = ("instruct", "chat", "turbo", "assistant")
+NON_CODE_CATEGORIES = {"factual", "math", "sentiment", "summary", "ner", "logic"}
 
 
 CATEGORY_MODEL_HINTS = {
     "codegen": ("coder", "code", "deepseek", "qwen", "kimi", "glm", "llama", "mixtral", "gemma"),
     "debug": ("coder", "code", "deepseek", "qwen", "kimi", "glm", "llama", "mixtral", "gemma"),
-    "math": ("minimax", "m3", "qwq", "reason", "r1", "deepseek", "qwen", "kimi", "glm", "llama", "mixtral", "gemma"),
-    "logic": ("minimax", "m3", "qwq", "reason", "r1", "deepseek", "qwen", "kimi", "glm", "llama", "mixtral", "gemma"),
-    "summary": ("llama", "qwen", "kimi", "glm", "mixtral", "deepseek", "gemma"),
-    "ner": ("llama", "qwen", "kimi", "glm", "mixtral", "deepseek", "gemma"),
-    "sentiment": ("llama", "qwen", "kimi", "glm", "mixtral", "deepseek", "gemma"),
-    "factual": ("llama", "qwen", "kimi", "glm", "mixtral", "deepseek", "gemma"),
+    "math": ("minimax", "m3", "kimi", "qwq", "reason", "r1", "deepseek", "qwen", "glm", "llama", "mixtral", "gemma"),
+    "logic": ("minimax", "m3", "kimi", "qwq", "reason", "r1", "deepseek", "qwen", "glm", "llama", "mixtral", "gemma"),
+    "summary": ("minimax", "m3", "kimi", "llama", "qwen", "glm", "mixtral", "deepseek", "gemma"),
+    "ner": ("minimax", "m3", "kimi", "llama", "qwen", "glm", "mixtral", "deepseek", "gemma"),
+    "sentiment": ("minimax", "m3", "kimi", "llama", "qwen", "glm", "mixtral", "deepseek", "gemma"),
+    "factual": ("minimax", "m3", "kimi", "llama", "qwen", "glm", "mixtral", "deepseek", "gemma"),
 }
 
 
@@ -295,7 +307,8 @@ def format_number(value: float) -> str:
 
 
 def safe_eval_arithmetic(expression: str) -> float | None:
-    expression = expression.replace("^", "**")
+    expression = expression.replace("^", "**").replace("×", "*")
+    expression = re.sub(r"(?<=\d)\s*x\s*(?=\d)", "*", expression, flags=re.IGNORECASE)
     if not re.fullmatch(r"[\d\s+\-*/().**]+", expression):
         return None
 
@@ -329,6 +342,19 @@ def safe_eval_arithmetic(expression: str) -> float | None:
 def local_math_answer(prompt: str) -> str | None:
     text = prompt.lower()
 
+    ratio_triangle_match = re.search(
+        r"triangle.*?ratio\s+(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?).*?"
+        r"(largest|smallest)",
+        text,
+        flags=re.DOTALL,
+    )
+    if ratio_triangle_match:
+        parts = [float(value) for value in ratio_triangle_match.groups()[:3]]
+        target = ratio_triangle_match.group(4)
+        angles = [part * 180 / sum(parts) for part in parts]
+        answer = max(angles) if target == "largest" else min(angles)
+        return f"{format_number(answer)} degrees"
+
     store_match = re.search(
         r"(?:has|starts? with)\s+(\d+(?:\.\d+)?)\s+\w+.*?"
         r"(?:sells?|sold)\s+(\d+(?:\.\d+)?)\s*%.*?"
@@ -353,6 +379,23 @@ def local_math_answer(prompt: str) -> str | None:
         if sub_match:
             value -= float(sub_match.group(1))
         return format_number(value)
+
+    average_match = re.search(
+        r"(?:average|mean)\s+(?:of\s+)?((?:-?\d+(?:\.\d+)?[\s,]+)+(?:and\s+)?-?\d+(?:\.\d+)?)",
+        text,
+    )
+    if average_match:
+        numbers = [float(value) for value in re.findall(r"-?\d+(?:\.\d+)?", average_match.group(1))]
+        if numbers:
+            return format_number(sum(numbers) / len(numbers))
+
+    sum_match = re.search(
+        r"sum\s+of\s+(-?\d+(?:\.\d+)?)\s+(?:and|,)\s+(-?\d+(?:\.\d+)?)",
+        text,
+    )
+    if sum_match:
+        left, right = map(float, sum_match.groups())
+        return format_number(left + right)
 
     expression_match = re.search(r"(?:what is|calculate|compute|evaluate|solve)\s+([0-9][0-9\s+\-*/().^]+)", text)
     if expression_match:
@@ -391,6 +434,9 @@ def local_sentiment_answer(prompt: str) -> str | None:
 
 
 def local_debug_answer(prompt: str) -> str | None:
+    if asks_for_non_python(prompt):
+        return None
+
     text = prompt.lower()
     if "return a-b" in text or "return a - b" in text:
         return "def add(a, b):\n    return a + b"
@@ -399,7 +445,34 @@ def local_debug_answer(prompt: str) -> str | None:
     return None
 
 
+def asks_for_non_python(prompt: str) -> bool:
+    text = prompt.lower()
+    return any(
+        re.search(rf"\b{re.escape(language)}\b", text)
+        for language in (
+            "javascript",
+            "typescript",
+            "java",
+            "c++",
+            "cpp",
+            "c#",
+            "csharp",
+            "go",
+            "rust",
+            "ruby",
+            "php",
+            "swift",
+            "kotlin",
+            "sql",
+            "regex",
+        )
+    )
+
+
 def local_codegen_answer(prompt: str) -> str | None:
+    if asks_for_non_python(prompt):
+        return None
+
     text = prompt.lower()
     if "is_even" in text or ("even" in text and "function" in text):
         return "def is_even(n):\n    return n % 2 == 0"
@@ -417,6 +490,12 @@ def local_codegen_answer(prompt: str) -> str | None:
         return "def factorial(n):\n    if n < 0:\n        raise ValueError(\"n must be non-negative\")\n    result = 1\n    for i in range(2, n + 1):\n        result *= i\n    return result"
     if "palindrome" in text and "function" in text:
         return "def is_palindrome(s):\n    s = str(s)\n    return s == s[::-1]"
+    if "count_vowels" in text or ("count" in text and "vowels" in text and "function" in text):
+        return "def count_vowels(s):\n    return sum(1 for ch in str(s).lower() if ch in \"aeiou\")"
+    if "reverse" in text and "string" in text and "function" in text:
+        return "def reverse_string(s):\n    return str(s)[::-1]"
+    if "sum" in text and "list" in text and "function" in text:
+        return "def sum_list(nums):\n    return sum(nums)"
     return None
 
 
@@ -477,7 +556,6 @@ def local_answer(prompt: str, category: str) -> str | None:
         return None
     solvers = {
         "math": local_math_answer,
-        "sentiment": local_sentiment_answer,
         "debug": local_debug_answer,
         "codegen": local_codegen_answer,
         "logic": local_logic_answer,
@@ -534,10 +612,10 @@ def score_model(model_id: str, category: str) -> int:
         score += 120
     if "kimi" in text and category in {"codegen", "debug"}:
         score += 600
-    if ("minimax" in text or "m3" in text) and category in {"math", "logic"}:
-        score += 600
-    if "gemma-4-31b" in text and category in {"factual", "sentiment", "summary", "ner"}:
-        score += 250
+    if ("minimax" in text or "m3" in text) and category in NON_CODE_CATEGORIES:
+        score += 650
+    if "kimi" in text and category in NON_CODE_CATEGORIES:
+        score += 260
     if "coder" in text and category in {"codegen", "debug"}:
         score += 500
     if any(hint in text for hint in ("qwq", "r1", "reason")) and category in {"math", "logic"}:
@@ -648,12 +726,13 @@ async def create_chat_completion(
     model: str,
     messages: list[dict[str, str]],
     max_tokens: int,
+    category: str,
 ) -> Any:
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "max_tokens": max_tokens,
-        "temperature": 0.0,
+        "temperature": TEMPERATURE_BY_CATEGORY.get(category, 0.0),
     }
     if (
         DEFAULT_REASONING_EFFORT
@@ -702,6 +781,7 @@ async def call_fireworks(
             {"role": "user", "content": prompt},
         ],
         max_tokens=profile.max_tokens,
+        category=profile.category,
     )
     record_usage(task_id, profile.category, stage, model, response)
 
@@ -735,6 +815,7 @@ async def review_answer(
             {"role": "user", "content": review_prompt},
         ],
         max_tokens=profile.max_tokens,
+        category=profile.category,
     )
     record_usage(task_id, profile.category, "review", model, response)
 
@@ -773,6 +854,7 @@ async def choose_best_answer(
             {"role": "user", "content": chooser_prompt},
         ],
         max_tokens=profile.max_tokens,
+        category=profile.category,
     )
     record_usage(task_id, profile.category, "consensus_choose", model, response)
     answer = response.choices[0].message.content

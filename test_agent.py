@@ -89,18 +89,32 @@ def main():
         {"task_id": "math_ratio", "prompt": "The angles of a triangle are in ratio 2:3:4. Find the largest angle."},
     ]
     expected_model_by_task_id = {
-        101: "gemma-4-31b-it",
+        101: "minimax-m3",
         "math": "minimax-m3",
-        "sentiment": "gemma-4-31b-it",
-        "summary": "gemma-4-31b-it",
-        "ner": "gemma-4-31b-it",
+        "sentiment": "minimax-m3",
+        "summary": "minimax-m3",
+        "ner": "minimax-m3",
         "debug": "kimi-k2p7-code",
         "logic": "minimax-m3",
         "codegen": "kimi-k2p7-code",
-        "summary_indirect": "gemma-4-31b-it",
-        "ner_indirect": "gemma-4-31b-it",
+        "summary_indirect": "minimax-m3",
+        "ner_indirect": "minimax-m3",
         "debug_indirect": "kimi-k2p7-code",
         "math_ratio": "minimax-m3",
+    }
+    expected_temperature_by_task_id = {
+        101: 0.0,
+        "math": 0.0,
+        "sentiment": 0.0,
+        "summary": 0.2,
+        "ner": 0.0,
+        "debug": 0.2,
+        "logic": 0.0,
+        "codegen": 0.2,
+        "summary_indirect": 0.2,
+        "ner_indirect": 0.0,
+        "debug_indirect": 0.2,
+        "math_ratio": 0.0,
     }
 
     port = 8000
@@ -164,6 +178,14 @@ def main():
             expected_model = expected_model_by_task_id[task["task_id"]]
             if call["model"] != expected_model:
                 raise SystemExit(f"task {task['task_id']} expected {expected_model}, saw {call['model']}")
+            expected_temperature = expected_temperature_by_task_id[task["task_id"]]
+            if call.get("temperature") != expected_temperature:
+                raise SystemExit(
+                    f"task {task['task_id']} expected temperature={expected_temperature}, "
+                    f"saw {call.get('temperature')}"
+                )
+            if "top_p" in call or "top_k" in call:
+                raise SystemExit(f"task {task['task_id']} sent top_p/top_k while temperature is controlled")
             if call["model"] == "minimax-m3" and call.get("reasoning_effort") != "none":
                 raise SystemExit(f"minimax call for task {task['task_id']} did not send reasoning_effort=none")
             if call["model"] != "minimax-m3" and "reasoning_effort" in call:
