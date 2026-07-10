@@ -1,52 +1,53 @@
-# AMD Developer Hackathon - Track 1 Local Qwen Experiment
+# AMD Developer Hackathon - Track 1 Hybrid Agent
 
-This branch packages Qwen3.5-2B Q4_K_M and the CPU-only llama.cpp runtime directly in the Docker image. It combines deterministic arithmetic with local Qwen inference, reads `/input/tasks.json`, and writes `/output/results.json` without making Fireworks or other external inference calls.
+This image combines deterministic verification, bundled Qwen3.5-2B inference, confidence-aware consensus, and selective Fireworks escalation for Track 1.
+
+## Routing strategy
+
+1. Supported arithmetic is solved deterministically at zero token cost.
+2. Every other task is attempted by the bundled Qwen3.5-2B Q4_K_M model.
+3. Sentiment and logic use two independent local samples when the runtime budget permits.
+4. The gate checks sample agreement, generated-token log probabilities, answer format, truncation, and category risk.
+5. Factual knowledge, named entity recognition, unsupported math, and uncertain local answers escalate through the injected `FIREWORKS_BASE_URL`.
+6. If escalation fails, the best valid local answer is retained instead of crashing.
+
+The gate uses transparent heuristic thresholds. It is not described as statistically calibrated because no hidden evaluation data or answer cache is used.
 
 ## Track 1 contract
 
-- Reads tasks from `/input/tasks.json` on startup.
-- Writes `[{"task_id": ..., "answer": "..."}]` to `/output/results.json`.
-- Preserves task IDs and input ordering.
-- Runs on `linux/amd64` with two CPU inference threads.
-- Uses no Fireworks credentials and makes zero Fireworks calls.
-- Solves supported arithmetic deterministically before invoking the model.
-- Bundles pinned model and runtime artifacts verified by SHA-256 during the image build.
+- Reads `/input/tasks.json` on startup.
+- Writes only `task_id` and `answer` fields to `/output/results.json`.
+- Reads `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, and `ALLOWED_MODELS` from the environment.
+- Calls only models listed in `ALLOWED_MODELS` and routes every paid call through `FIREWORKS_BASE_URL`.
+- Bundles Qwen3.5-2B and llama.cpp; no model download occurs during evaluation.
+- Runs on `linux/amd64` with two local inference threads.
+- Uses no personal API key and contains no cached evaluation answers.
 
-## Local model
-
-- Model: Qwen3.5-2B instruction-tuned model
-- Quantization: Q4_K_M GGUF, approximately 1.4 GB
-- Runtime: llama.cpp `b9952`, CPU-only
-- Context: 4096 tokens
-- Server slots: 1
-- CPU threads: 2
-
-The image intentionally excludes the vision projector because Track 1 inputs are text tasks.
-
-## Contract test
+## Tests
 
 ```bash
 python test_agent.py
 ```
 
-This test uses a local mock model server to verify input/output handling, category routing, reasoning-tag removal, and that no Fireworks environment variables are needed. It does not measure model accuracy.
+The contract test uses local mock servers to verify deterministic routing, consensus calls, selective escalation, allowed-model enforcement, fallback behavior, and the required result schema.
 
-## Constrained Docker test
+For the constrained container test:
 
 ```bash
-docker build --platform linux/amd64 -t amd-track1-local-qwen .
+docker build --platform linux/amd64 -t amd-track1-hybrid .
 docker run --rm --memory=4g --cpus=2 \
   -v /absolute/path/to/input:/input:ro \
   -v /absolute/path/to/output:/output \
-  amd-track1-local-qwen
+  -e FIREWORKS_API_KEY="provided-by-harness" \
+  -e FIREWORKS_BASE_URL="provided-by-harness" \
+  -e ALLOWED_MODELS="provided-by-harness" \
+  amd-track1-hybrid
 ```
 
 ## Published image
 
-GitHub Actions publishes the experiment as:
-
 ```text
-ghcr.io/engerer/amd-hackathon:t1-local-qwen-v1
+ghcr.io/engerer/amd-hackathon:t1-hybrid-v1
 ```
 
-It also publishes an immutable `t1-<full-commit-sha>` tag. Historical experiment tags are not overwritten.
+The workflow also publishes an immutable `t1-<full-commit-sha>` tag. The previous `t1-local-qwen-v1` image remains available as the zero-token baseline.

@@ -51,5 +51,5 @@ jobs:
           tags: |
             ${{ steps.image.outputs.image_name }}:latest
             ${{ steps.image.outputs.image_name }}:amd64
-            ${{ steps.image.outputs.image_name }}:t1-local-qwen-v1
+            ${{ steps.image.outputs.image_name }}:t1-hybrid-v1
             ${{ steps.image.outputs.image_name }}:t1-${{ github.sha }}

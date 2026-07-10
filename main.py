@@ -1,6 +1,8 @@
 import ast
+import difflib
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -27,7 +29,7 @@ LLAMA_SERVER_PATH = os.getenv("LLAMA_SERVER_PATH", "/opt/llama/llama-server")
 LOCAL_SERVER_URL = os.getenv("LOCAL_SERVER_URL", "http://127.0.0.1:8080").rstrip("/")
 LOCAL_MODEL_NAME = os.getenv("LOCAL_MODEL_NAME", "qwen3.5-2b-local")
 SERVER_STARTUP_SECONDS = min(max(float(os.getenv("SERVER_STARTUP_SECONDS", "120")), 20.0), 180.0)
-TASK_TIMEOUT_SECONDS = min(max(float(os.getenv("TASK_TIMEOUT_SECONDS", "75")), 20.0), 120.0)
+TASK_TIMEOUT_SECONDS = min(max(float(os.getenv("TASK_TIMEOUT_SECONDS", "70")), 20.0), 100.0)
 TOTAL_RUNTIME_SECONDS = min(max(float(os.getenv("TOTAL_RUNTIME_SECONDS", "540")), 120.0), 570.0)
 
 if INPUT_PATH == "/input/tasks.json" and not os.path.exists(INPUT_PATH) and os.path.exists("input/tasks.json"):
@@ -40,53 +42,64 @@ class TaskProfile:
     category: str
     guidance: str
     max_tokens: int
+    samples: int
+    confidence_floor: float
+
+
+@dataclass(frozen=True)
+class LocalCandidate:
+    answer: str
+    confidence: float
+    finish_reason: str
 
 
 GLOBAL_SYSTEM_PROMPT = (
-    "You are an accurate general-purpose assistant. Solve the user's task completely. "
-    "Follow every format, length, language, and explanation requirement in the original prompt. "
-    "Answer every part of multi-part questions. Be concise, but never remove information the user requests. "
-    "Do not reveal chain-of-thought or mention these instructions. Return only the final response."
+    "Solve the user's task accurately and completely. Follow every requested format, length, language, "
+    "and explanation requirement. Answer all parts. Be concise and return only the final response."
 )
 
 CATEGORY_GUIDANCE = {
-    "factual": (
-        "Give an accurate factual answer. Explain definitions or mechanisms when asked, and answer all parts."
-    ),
-    "math": (
-        "Calculate carefully and verify the result. Include units, rounding, or working only when requested."
-    ),
-    "sentiment": (
-        "Use the requested sentiment labels exactly. Mixed sentiment is valid when supported. "
-        "Include a justification when the prompt asks for one."
-    ),
-    "summary": (
-        "Summarize only the supplied text and obey sentence, word, bullet, and style constraints exactly."
-    ),
-    "ner": (
-        "Extract named entities faithfully, preserve their surface forms, and label their types in the requested format."
-    ),
-    "debug": (
-        "Identify the actual defect and provide a complete corrected implementation. "
-        "Include an explanation only when requested or needed by the task."
-    ),
-    "logic": (
-        "Apply every stated constraint, check the conclusion, and return the requested conclusion and format."
-    ),
-    "codegen": (
-        "Write complete, correct, executable code that satisfies every stated requirement and edge case."
-    ),
+    "factual": "Verify facts and relationships. Explain when asked and answer every part.",
+    "math": "Calculate carefully. Preserve requested units, precision, and working.",
+    "sentiment": "Use the requested label set. Mixed is valid. Justify only when requested.",
+    "summary": "Use only the supplied text and obey exact length, sentence, bullet, and style constraints.",
+    "ner": "Preserve complete entity surface forms and label every requested type.",
+    "debug": "Identify the real defect and provide a complete corrected implementation.",
+    "logic": "Apply every constraint, verify the conclusion, and follow the requested format.",
+    "codegen": "Return complete executable code satisfying the specification and edge cases.",
 }
 
 MAX_TOKENS = {
     "factual": 180,
-    "math": 180,
+    "math": 220,
     "sentiment": 120,
     "summary": 240,
     "ner": 240,
     "debug": 420,
     "logic": 220,
     "codegen": 420,
+}
+
+LOCAL_SAMPLES = {
+    "factual": 1,
+    "math": 1,
+    "sentiment": 2,
+    "summary": 1,
+    "ner": 1,
+    "debug": 1,
+    "logic": 2,
+    "codegen": 1,
+}
+
+CONFIDENCE_FLOORS = {
+    "factual": 0.55,
+    "math": 0.55,
+    "sentiment": 0.38,
+    "summary": 0.24,
+    "ner": 0.40,
+    "debug": 0.22,
+    "logic": 0.32,
+    "codegen": 0.22,
 }
 
 CATEGORY_PATTERNS = {
@@ -140,6 +153,21 @@ COMPILED_PATTERNS = {
     for category, patterns in CATEGORY_PATTERNS.items()
 }
 
+MODEL_EXCLUDE_HINTS = (
+    "audio", "clip", "diffusion", "embed", "guard", "image", "moderation", "rerank", "tts", "vision", "whisper"
+)
+
+CATEGORY_MODEL_HINTS = {
+    "factual": ("minimax", "gemma", "llama", "qwen", "kimi", "deepseek"),
+    "math": ("minimax", "reason", "qwq", "qwen", "kimi", "deepseek", "llama"),
+    "sentiment": ("gemma", "minimax", "llama", "qwen", "kimi"),
+    "summary": ("gemma", "minimax", "llama", "qwen", "kimi"),
+    "ner": ("minimax", "gemma", "llama", "qwen", "kimi"),
+    "debug": ("kimi", "coder", "code", "qwen", "deepseek", "minimax"),
+    "logic": ("minimax", "reason", "qwen", "kimi", "deepseek", "llama"),
+    "codegen": ("kimi", "coder", "code", "qwen", "deepseek", "minimax"),
+}
+
 
 def classify_task(prompt: str) -> str:
     for category in CATEGORY_PRIORITY:
@@ -150,7 +178,13 @@ def classify_task(prompt: str) -> str:
 
 def build_profile(prompt: str) -> TaskProfile:
     category = classify_task(prompt)
-    return TaskProfile(category, CATEGORY_GUIDANCE[category], MAX_TOKENS[category])
+    return TaskProfile(
+        category=category,
+        guidance=CATEGORY_GUIDANCE[category],
+        max_tokens=MAX_TOKENS[category],
+        samples=LOCAL_SAMPLES[category],
+        confidence_floor=CONFIDENCE_FLOORS[category],
+    )
 
 
 def format_number(value: float) -> str:
@@ -163,26 +197,13 @@ def safe_arithmetic(expression: str) -> float | None:
     expression = expression.replace("^", "**").replace("x", "*").replace("X", "*")
     if not re.fullmatch(r"[\d\s+*/().%-]+", expression):
         return None
-
     try:
         tree = ast.parse(expression, mode="eval")
     except SyntaxError:
         return None
-
     allowed_nodes = (
-        ast.Expression,
-        ast.BinOp,
-        ast.UnaryOp,
-        ast.Add,
-        ast.Sub,
-        ast.Mult,
-        ast.Div,
-        ast.FloorDiv,
-        ast.Mod,
-        ast.Pow,
-        ast.USub,
-        ast.UAdd,
-        ast.Constant,
+        ast.Expression, ast.BinOp, ast.UnaryOp, ast.Add, ast.Sub, ast.Mult, ast.Div,
+        ast.FloorDiv, ast.Mod, ast.Pow, ast.USub, ast.UAdd, ast.Constant,
     )
     if any(not isinstance(node, allowed_nodes) for node in ast.walk(tree)):
         return None
@@ -194,20 +215,17 @@ def safe_arithmetic(expression: str) -> float | None:
 
 def local_math_answer(prompt: str) -> str | None:
     text = " ".join(prompt.lower().split())
-
     inventory = re.search(
         r"(?:has|starts? with)\s+(\d+(?:\.\d+)?)\s+(?:items?|units?|products?).*?"
         r"(?:sells?|sold)\s+(\d+(?:\.\d+)?)\s*%.*?"
         r"(?:and|then)\s+(\d+(?:\.\d+)?)\s+(more\s+than\s+(?:monday|the first day)|more\s+on\s+\w+|"
-        r"(?:items?\s+)?on\s+\w+).*?"
-        r"(?:remain|remaining|left)",
+        r"(?:items?\s+)?on\s+\w+).*?(?:remain|remaining|left)",
         text,
     )
     if inventory:
         starting, percentage, later = map(float, inventory.groups()[:3])
         first_day = starting * percentage / 100
-        phrase = inventory.group(4)
-        second_day = first_day + later if phrase.startswith("more than") else later
+        second_day = first_day + later if inventory.group(4).startswith("more than") else later
         return format_number(starting - first_day - second_day)
 
     percentage = re.search(r"(\d+(?:\.\d+)?)\s*%\s+of\s+(\d+(?:\.\d+)?)", text)
@@ -223,10 +241,7 @@ def local_math_answer(prompt: str) -> str | None:
             value -= float(subtraction.group(1))
         return format_number(value)
 
-    direct = re.search(
-        r"(?:calculate|compute|evaluate|what is|find)\s+([\d\s+*/().%xX^-]+?)(?:\?|$)",
-        text,
-    )
+    direct = re.search(r"(?:calculate|compute|evaluate|what is|find)\s+([\d\s+*/().%xX^-]+?)(?:\?|$)", text)
     if direct:
         value = safe_arithmetic(direct.group(1).strip())
         if value is not None:
@@ -237,17 +252,13 @@ def local_math_answer(prompt: str) -> str | None:
 def read_tasks() -> list[dict[str, Any]]:
     if not os.path.exists(INPUT_PATH):
         raise FileNotFoundError(f"Input file not found: {INPUT_PATH}")
-
     with open(INPUT_PATH, "r", encoding="utf-8-sig") as file:
         tasks = json.load(file)
-
     if not isinstance(tasks, list) or not tasks:
         raise ValueError("Input JSON must be a non-empty list of task objects.")
     for index, task in enumerate(tasks):
-        if not isinstance(task, dict):
-            raise ValueError(f"Task at index {index} is not an object.")
-        if "task_id" not in task:
-            raise ValueError(f"Task at index {index} must contain task_id.")
+        if not isinstance(task, dict) or "task_id" not in task:
+            raise ValueError(f"Task at index {index} must be an object containing task_id.")
         if not any(key in task for key in ("prompt", "question", "input", "text")):
             raise ValueError(f"Task at index {index} must contain prompt text.")
     return tasks
@@ -255,21 +266,33 @@ def read_tasks() -> list[dict[str, Any]]:
 
 def task_prompt(task: dict[str, Any]) -> str:
     for key in ("prompt", "question", "input", "text"):
-        value = task.get(key)
-        if value is not None:
-            return str(value)
+        if task.get(key) is not None:
+            return str(task[key])
     raise ValueError("Task is missing prompt text.")
 
 
-def post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+def post_json(
+    url: str,
+    payload: dict[str, Any],
+    timeout: float,
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    request_headers = {"Content-Type": "application/json"}
+    if headers:
+        request_headers.update(headers)
     request = urllib.request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=request_headers,
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def chat_endpoint(base_url: str) -> str:
+    base = base_url.rstrip("/")
+    return base if base.endswith("/chat/completions") else f"{base}/chat/completions"
 
 
 def server_is_ready() -> bool:
@@ -282,9 +305,8 @@ def server_is_ready() -> bool:
 
 def start_local_server() -> tuple[subprocess.Popen[Any] | None, Any | None]:
     if os.getenv("LOCAL_SERVER_URL"):
-        logger.info("Using externally supplied local model server at %s", LOCAL_SERVER_URL)
+        logger.info("Using supplied local model server at %s", LOCAL_SERVER_URL)
         return None, None
-
     if not os.path.exists(LLAMA_SERVER_PATH):
         raise FileNotFoundError(f"llama-server not found: {LLAMA_SERVER_PATH}")
     if not os.path.exists(MODEL_PATH):
@@ -310,19 +332,17 @@ def start_local_server() -> tuple[subprocess.Popen[Any] | None, Any | None]:
         "--no-webui",
         "--offline",
     ]
-    logger.info("Starting bundled Qwen3.5-2B model on 2 CPU threads")
+    logger.info("Starting bundled Qwen3.5-2B on two CPU threads")
     process = subprocess.Popen(command, stdout=server_log, stderr=subprocess.STDOUT)
-
     deadline = time.monotonic() + SERVER_STARTUP_SECONDS
     while time.monotonic() < deadline:
         if process.poll() is not None:
             server_log.flush()
-            raise RuntimeError(f"Local model server exited with code {process.returncode}; see /tmp/llama-server.log")
+            raise RuntimeError(f"Local model server exited with code {process.returncode}")
         if server_is_ready():
             logger.info("Local model server is ready")
             return process, server_log
         time.sleep(1)
-
     process.terminate()
     raise TimeoutError("Local model server did not become ready in time")
 
@@ -348,28 +368,195 @@ def clean_answer(answer: str) -> str:
     return answer
 
 
-def run_task(prompt: str, profile: TaskProfile, timeout: float) -> str:
-    system_prompt = f"{GLOBAL_SYSTEM_PROMPT}\n\nTask guidance: {profile.guidance}"
+def token_confidence(response: dict[str, Any]) -> float:
+    try:
+        content = response["choices"][0]["logprobs"]["content"]
+    except (KeyError, IndexError, TypeError):
+        return 0.0
+    values = [float(item["logprob"]) for item in content if item.get("token") and item.get("logprob") is not None]
+    if not values:
+        return 0.0
+    return max(0.0, min(1.0, math.exp(sum(values) / len(values))))
+
+
+def run_local_sample(prompt: str, profile: TaskProfile, timeout: float, seed: int, temperature: float) -> LocalCandidate:
     payload = {
         "model": LOCAL_MODEL_NAME,
         "messages": [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": f"{GLOBAL_SYSTEM_PROMPT}\n{profile.guidance}"},
             {"role": "user", "content": prompt},
         ],
         "max_tokens": profile.max_tokens,
-        "temperature": 0.2,
+        "temperature": temperature,
         "top_p": 0.9,
         "top_k": 20,
-        "seed": 7,
+        "seed": seed,
+        "logprobs": True,
+        "top_logprobs": 3,
     }
-    response = post_json(f"{LOCAL_SERVER_URL}/v1/chat/completions", payload, timeout)
+    response = post_json(chat_endpoint(LOCAL_SERVER_URL), payload, timeout)
     choices = response.get("choices") or []
     if not choices:
         raise RuntimeError("Local model returned no choices")
     answer = clean_answer(str(choices[0].get("message", {}).get("content", "")))
     if not answer:
         raise RuntimeError("Local model returned an empty answer")
-    return answer
+    return LocalCandidate(answer, token_confidence(response), str(choices[0].get("finish_reason", "")))
+
+
+def candidate_key(answer: str, category: str) -> str:
+    text = answer.strip().lower()
+    if category == "sentiment":
+        head = " ".join(text.split()[:12])
+        if re.search(r"\bmixed\b", head):
+            return "mixed"
+        for label in ("positive", "negative", "neutral"):
+            if re.search(rf"\b{label}\b", head):
+                return label
+    if category == "math":
+        numbers = re.findall(r"[-+]?\d+(?:\.\d+)?(?:\s*/\s*\d+)?", text)
+        if numbers:
+            return numbers[-1].replace(" ", "")
+    if category == "logic":
+        therefore = re.findall(r"(?:therefore|thus|so),?\s+([^\n]+)", text)
+        if therefore:
+            text = therefore[-1]
+        else:
+            sentences = [part.strip() for part in re.split(r"[.!?\n]+", text) if part.strip()]
+            if sentences:
+                text = sentences[-1]
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def candidates_agree(candidates: list[LocalCandidate], category: str) -> bool:
+    if len(candidates) < 2:
+        return True
+    keys = [candidate_key(candidate.answer, category) for candidate in candidates]
+    if all(key == keys[0] for key in keys[1:]):
+        return True
+    return all(difflib.SequenceMatcher(None, keys[0], key).ratio() >= 0.82 for key in keys[1:])
+
+
+def format_is_valid(prompt: str, answer: str, category: str) -> bool:
+    if not answer.strip():
+        return False
+    if category == "sentiment" and candidate_key(answer, category) not in {"positive", "negative", "neutral", "mixed"}:
+        return False
+    if category in {"debug", "codegen"} and re.search(r"\b(?:function|class|method|python|javascript|code)\b", prompt, re.IGNORECASE):
+        if not re.search(r"\b(?:def|class|function|return|const|let|var|public|private)\b", answer):
+            return False
+    if category == "summary" and re.search(r"\bexactly one sentence\b", prompt, re.IGNORECASE):
+        sentences = [part for part in re.split(r"(?<=[.!?])\s+", answer.strip()) if part]
+        if len(sentences) != 1:
+            return False
+    return True
+
+
+def escalation_reason(prompt: str, profile: TaskProfile, candidates: list[LocalCandidate]) -> str | None:
+    if profile.category in {"factual", "ner"}:
+        return f"measured-hard category: {profile.category}"
+    if profile.category == "math":
+        return "math not handled by deterministic verifier"
+    if not candidates:
+        return "local inference failed"
+    selected = choose_local_candidate(candidates)
+    if selected.finish_reason == "length":
+        return "local answer was truncated"
+    if not format_is_valid(prompt, selected.answer, profile.category):
+        return "local answer failed format validation"
+    if len(candidates) > 1:
+        if not candidates_agree(candidates, profile.category):
+            return "local samples disagreed"
+        return None
+    confidence = sum(candidate.confidence for candidate in candidates) / len(candidates)
+    if confidence < profile.confidence_floor:
+        return f"local confidence {confidence:.2f} below {profile.confidence_floor:.2f}"
+    return None
+
+
+def model_score(model: str, category: str) -> int:
+    text = model.lower()
+    if any(hint in text for hint in MODEL_EXCLUDE_HINTS):
+        return -10_000
+    score = 0
+    if "instruct" in text or "chat" in text or "it" in text:
+        score += 120
+    if "base" in text:
+        score -= 500
+    for rank, hint in enumerate(CATEGORY_MODEL_HINTS[category]):
+        if hint in text:
+            score += 300 - rank * 25
+    return score
+
+
+def allowed_models() -> list[str]:
+    return [model.strip() for model in os.getenv("ALLOWED_MODELS", "").split(",") if model.strip()]
+
+
+def fireworks_available() -> bool:
+    return bool(os.getenv("FIREWORKS_API_KEY") and os.getenv("FIREWORKS_BASE_URL") and allowed_models())
+
+
+def call_fireworks(prompt: str, profile: TaskProfile, timeout: float) -> tuple[str, str, int]:
+    api_key = os.getenv("FIREWORKS_API_KEY", "")
+    base_url = os.getenv("FIREWORKS_BASE_URL", "")
+    models = sorted(allowed_models(), key=lambda model: model_score(model, profile.category), reverse=True)
+    usable = [model for model in models if model_score(model, profile.category) > -1_000]
+    if not api_key or not base_url or not usable:
+        raise RuntimeError("Fireworks escalation is unavailable")
+
+    last_error: Exception | None = None
+    for model in usable[:2]:
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": f"{GLOBAL_SYSTEM_PROMPT}\n{profile.guidance}"},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": profile.max_tokens,
+            "temperature": 0.0,
+        }
+        if any(hint in model.lower() for hint in ("minimax", "reason", "r1", "gpt")):
+            payload["reasoning_effort"] = "low" if profile.category in {"math", "logic", "debug", "codegen"} else "none"
+        try:
+            response = post_json(
+                chat_endpoint(base_url),
+                payload,
+                timeout,
+                {"Authorization": f"Bearer {api_key}"},
+            )
+        except urllib.error.HTTPError as exc:
+            if "reasoning_effort" in payload and exc.code == 400:
+                payload.pop("reasoning_effort", None)
+                try:
+                    response = post_json(
+                        chat_endpoint(base_url), payload, timeout, {"Authorization": f"Bearer {api_key}"}
+                    )
+                except Exception as retry_error:
+                    last_error = retry_error
+                    continue
+            else:
+                last_error = exc
+                continue
+        except Exception as exc:
+            last_error = exc
+            continue
+
+        choices = response.get("choices") or []
+        if not choices:
+            last_error = RuntimeError("Fireworks returned no choices")
+            continue
+        answer = clean_answer(str(choices[0].get("message", {}).get("content", "")))
+        if not answer:
+            last_error = RuntimeError("Fireworks returned an empty answer")
+            continue
+        usage = response.get("usage") or {}
+        return answer, model, int(usage.get("total_tokens") or 0)
+    raise RuntimeError(f"Fireworks escalation failed: {last_error}")
+
+
+def choose_local_candidate(candidates: list[LocalCandidate]) -> LocalCandidate:
+    return max(candidates, key=lambda candidate: (candidate.confidence, -len(candidate.answer)))
 
 
 def write_results(results: list[dict[str, Any]]) -> None:
@@ -387,6 +574,8 @@ def run() -> int:
     started_at = time.monotonic()
     process: subprocess.Popen[Any] | None = None
     server_log: Any | None = None
+    route_counts = {"deterministic": 0, "local": 0, "fireworks": 0, "fallback": 0}
+    paid_tokens = 0
 
     try:
         tasks = read_tasks()
@@ -394,31 +583,71 @@ def run() -> int:
         results: list[dict[str, Any]] = []
 
         for task in tasks:
-            elapsed = time.monotonic() - started_at
-            remaining = TOTAL_RUNTIME_SECONDS - elapsed
+            remaining = TOTAL_RUNTIME_SECONDS - (time.monotonic() - started_at)
             if remaining < 10:
                 raise TimeoutError("Not enough time remains to complete all tasks")
-
             prompt = task_prompt(task)
             profile = build_profile(prompt)
-            answer = local_math_answer(prompt) if profile.category == "math" else None
-            if answer is not None:
-                logger.info("Processing task %s with deterministic local math", task["task_id"])
+            deterministic = local_math_answer(prompt) if profile.category == "math" else None
+            if deterministic is not None:
+                route_counts["deterministic"] += 1
+                logger.info("Task %s solved by deterministic math", task["task_id"])
+                results.append({"task_id": task["task_id"], "answer": deterministic})
+                continue
+
+            candidates: list[LocalCandidate] = []
+            sample_count = profile.samples if remaining > 140 else 1
+            if remaining < 70 and profile.category in {"factual", "ner", "math"} and fireworks_available():
+                sample_count = 0
+            for index in range(sample_count):
+                try:
+                    candidates.append(
+                        run_local_sample(
+                            prompt,
+                            profile,
+                            min(TASK_TIMEOUT_SECONDS, max(20.0, remaining - 8)),
+                            seed=(7, 29)[index],
+                            temperature=(0.2, 0.65)[index],
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning("Task %s local sample %d failed: %s", task["task_id"], index + 1, exc)
+                    break
+
+            reason = escalation_reason(prompt, profile, candidates)
+            selected = choose_local_candidate(candidates) if candidates else None
+            if reason and fireworks_available():
+                logger.info("Task %s escalating to Fireworks: %s", task["task_id"], reason)
+                try:
+                    answer, model, tokens = call_fireworks(prompt, profile, min(35.0, max(10.0, remaining - 5)))
+                    paid_tokens += tokens
+                    route_counts["fireworks"] += 1
+                    logger.info("Task %s completed by %s (%d proxy tokens)", task["task_id"], model, tokens)
+                    results.append({"task_id": task["task_id"], "answer": answer})
+                    continue
+                except Exception as exc:
+                    logger.warning("Task %s escalation failed; retaining local answer: %s", task["task_id"], exc)
+
+            if selected is not None:
+                route_counts["local"] += 1
+                logger.info(
+                    "Task %s accepted locally as %s (confidence %.2f, samples %d%s)",
+                    task["task_id"], profile.category, selected.confidence, len(candidates),
+                    f", gate override: {reason}" if reason else "",
+                )
+                results.append({"task_id": task["task_id"], "answer": selected.answer})
             else:
-                logger.info("Processing task %s with Qwen as %s", task["task_id"], profile.category)
-                answer = run_task(prompt, profile, min(TASK_TIMEOUT_SECONDS, remaining - 5))
-            results.append({"task_id": task["task_id"], "answer": answer})
+                route_counts["fallback"] += 1
+                results.append({"task_id": task["task_id"], "answer": "Unable to determine the answer."})
 
         write_results(results)
         logger.info(
-            "Wrote %d local-model results to %s in %.1f seconds; Fireworks calls: 0",
-            len(results),
-            OUTPUT_PATH,
-            time.monotonic() - started_at,
+            "Wrote %d results in %.1fs | routes=%s | Fireworks proxy tokens=%d",
+            len(results), time.monotonic() - started_at, route_counts, paid_tokens,
         )
         return 0
     except Exception as exc:
-        logger.exception("Local agent failed: %s", exc)
+        logger.exception("Hybrid agent failed: %s", exc)
         return 1
     finally:
         stop_local_server(process, server_log)

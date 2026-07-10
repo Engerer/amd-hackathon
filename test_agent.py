@@ -11,10 +11,31 @@ from tempfile import TemporaryDirectory
 from main import local_math_answer
 
 
-CALLS = []
+LOCAL_CALLS = []
+FIREWORKS_CALLS = []
+ALLOWED_MODELS = ["minimax-m3", "kimi-k2p7-code", "gemma-4-31b-it"]
 
 
-class MockLocalModelHandler(BaseHTTPRequestHandler):
+def prompt_answer(prompt):
+    lowered = prompt.lower()
+    if "capital of australia" in lowered:
+        return "Canberra is near Lake Macquarie."
+    if "sentiment" in lowered:
+        return "Mixed. It praises the battery but criticizes the screen."
+    if "summarize" in lowered:
+        return "Open standards reduce integration work and vendor lock-in through shared interfaces."
+    if "named entities" in lowered:
+        return "Maria; Fireworks AI; Berlin"
+    if "get_max" in lowered:
+        return "def get_max(nums):\n    return max(nums)"
+    if "who owns the cat" in lowered:
+        return "Therefore, Sam owns the cat."
+    if "second-largest" in lowered:
+        return "def second_largest(values):\n    unique = sorted(set(values), reverse=True)\n    if len(unique) < 2: raise ValueError\n    return unique[1]"
+    return "Local answer"
+
+
+class MockLocalHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
@@ -24,27 +45,33 @@ class MockLocalModelHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         self.send_response(200)
-        self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(b'{"status":"ok"}')
 
     def do_POST(self):
-        if self.path != "/v1/chat/completions":
+        if self.path != "/chat/completions":
             self.send_response(404)
             self.end_headers()
             return
-
-        content_length = int(self.headers["Content-Length"])
-        request = json.loads(self.rfile.read(content_length).decode("utf-8"))
-        CALLS.append(request)
+        request = json.loads(self.rfile.read(int(self.headers["Content-Length"])).decode("utf-8"))
+        LOCAL_CALLS.append(request)
         prompt = request["messages"][-1]["content"]
-        answer = f"<think>private reasoning</think>mock local answer for: {prompt[:60]}"
-        body = {
-            "id": "local-test",
-            "object": "chat.completion",
-            "model": "qwen3.5-2b-local",
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": answer}, "finish_reason": "stop"}],
-        }
+        answer = prompt_answer(prompt)
+        token_logprobs = [
+            {"token": token, "logprob": -0.12, "top_logprobs": []}
+            for token in answer.split()
+        ]
+        self.send_json({
+            "choices": [{
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": answer},
+                "logprobs": {"content": token_logprobs},
+            }],
+            "usage": {"prompt_tokens": 20, "completion_tokens": len(token_logprobs), "total_tokens": 20 + len(token_logprobs)},
+        })
+
+    def send_json(self, body):
         encoded = json.dumps(body).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -53,8 +80,37 @@ class MockLocalModelHandler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
 
-def run_mock_server(port):
-    ThreadingHTTPServer(("127.0.0.1", port), MockLocalModelHandler).serve_forever()
+class MockFireworksHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        return
+
+    def do_POST(self):
+        if self.path != "/v1/chat/completions":
+            self.send_response(404)
+            self.end_headers()
+            return
+        request = json.loads(self.rfile.read(int(self.headers["Content-Length"])).decode("utf-8"))
+        FIREWORKS_CALLS.append(request)
+        prompt = request["messages"][-1]["content"].lower()
+        if "capital of australia" in prompt:
+            answer = "Canberra, near Lake Burley Griffin."
+        elif "named entities" in prompt:
+            answer = "Person: Maria Sanchez\nOrganization: Fireworks AI\nLocation: Berlin\nDate: March"
+        else:
+            answer = "Escalated answer"
+        encoded = json.dumps({
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": answer}}],
+            "usage": {"prompt_tokens": 60, "completion_tokens": 15, "total_tokens": 75},
+        }).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+
+def serve(port, handler):
+    ThreadingHTTPServer(("127.0.0.1", port), handler).serve_forever()
 
 
 def main():
@@ -64,18 +120,18 @@ def main():
         raise SystemExit("deterministic percentage solver failed")
 
     tasks = [
-        {"task_id": 101, "prompt": "What does a CPU cache do?"},
-        {"task_id": "math", "prompt": "Calculate 18% of 250 and add 17."},
-        {"task_id": "sentiment", "prompt": "Classify the sentiment and justify it: The service was fast but the meal was cold."},
-        {"task_id": "summary", "prompt": "Summarize in one sentence: Open standards help teams integrate software reliably."},
-        {"task_id": "ner", "prompt": "Extract named entities: Dr. Maya Chen met AMD engineers in Austin on July 2, 2026."},
-        {"task_id": "debug", "prompt": "Fix the bug in this Python code: def add(a,b): return a-b"},
-        {"task_id": "logic", "prompt": "Solve this logic puzzle: Ana is older than Bo. Bo is older than Cy. Who is youngest?"},
-        {"task_id": "codegen", "prompt": "Write a Python function is_even(n) that returns True for even integers."},
+        {"task_id": "factual", "prompt": "What is the capital of Australia, and what body of water is it near?"},
+        {"task_id": "math", "prompt": "A store has 240 items. It sells 15% on Monday and 60 more on Tuesday. How many items remain?"},
+        {"task_id": "sentiment", "prompt": "Classify the sentiment and justify it: The battery is great, but the screen scratches easily."},
+        {"task_id": "summary", "prompt": "Summarize in one sentence: Open standards reduce integration work and vendor lock-in through shared interfaces."},
+        {"task_id": "ner", "prompt": "Extract all named entities: Maria Sanchez joined Fireworks AI in Berlin last March."},
+        {"task_id": "debug", "prompt": "Fix the bug in this Python code: def get_max(nums): return nums[0]"},
+        {"task_id": "logic", "prompt": "Jo owns the dog. Sam does not own the bird. Who owns the cat?"},
+        {"task_id": "codegen", "prompt": "Write a Python function returning the second-largest distinct value."},
     ]
 
-    port = 8011
-    threading.Thread(target=run_mock_server, args=(port,), daemon=True).start()
+    threading.Thread(target=serve, args=(8011, MockLocalHandler), daemon=True).start()
+    threading.Thread(target=serve, args=(8012, MockFireworksHandler), daemon=True).start()
     time.sleep(0.3)
 
     with TemporaryDirectory() as temporary_directory:
@@ -83,14 +139,13 @@ def main():
         input_path = root / "tasks.json"
         output_path = root / "results.json"
         input_path.write_text(json.dumps(tasks), encoding="utf-8")
-
         environment = os.environ.copy()
-        environment.pop("FIREWORKS_API_KEY", None)
-        environment.pop("FIREWORKS_BASE_URL", None)
-        environment.pop("ALLOWED_MODELS", None)
         environment["INPUT_PATH"] = str(input_path)
         environment["OUTPUT_PATH"] = str(output_path)
-        environment["LOCAL_SERVER_URL"] = f"http://127.0.0.1:{port}"
+        environment["LOCAL_SERVER_URL"] = "http://127.0.0.1:8011"
+        environment["FIREWORKS_API_KEY"] = "mock-harness-key"
+        environment["FIREWORKS_BASE_URL"] = "http://127.0.0.1:8012/v1"
+        environment["ALLOWED_MODELS"] = ",".join(ALLOWED_MODELS)
 
         result = subprocess.run([sys.executable, "main.py"], env=environment, capture_output=True, text=True)
         print(result.stdout)
@@ -100,20 +155,23 @@ def main():
             raise SystemExit(f"main.py failed with exit code {result.returncode}")
 
         output = json.loads(output_path.read_text(encoding="utf-8"))
-        if len(output) != len(tasks):
-            raise SystemExit(f"expected {len(tasks)} results, got {len(output)}")
-        if [item["task_id"] for item in output] != [task["task_id"] for task in tasks]:
-            raise SystemExit("task IDs or ordering changed")
-        if any(set(item) != {"task_id", "answer"} or not item["answer"] for item in output):
-            raise SystemExit("each result must contain only non-empty task_id and answer fields")
-        if any("<think>" in item["answer"] for item in output):
-            raise SystemExit("private reasoning tags leaked into output")
-        if len(CALLS) != len(tasks) - 1:
-            raise SystemExit(f"expected one task to use deterministic math and all others to call Qwen, got {len(CALLS)} calls")
-        if any(call.get("model") != "qwen3.5-2b-local" for call in CALLS):
-            raise SystemExit("unexpected local model name")
+        if len(output) != len(tasks) or any(set(item) != {"task_id", "answer"} for item in output):
+            raise SystemExit("invalid Track 1 result schema")
+        by_id = {item["task_id"]: item["answer"] for item in output}
+        if by_id["math"] != "144":
+            raise SystemExit("deterministic math result was not used")
+        if "Lake Burley Griffin" not in by_id["factual"]:
+            raise SystemExit("factual task did not use Fireworks correction")
+        if "Maria Sanchez" not in by_id["ner"]:
+            raise SystemExit("NER task did not use Fireworks correction")
+        if len(FIREWORKS_CALLS) != 2:
+            raise SystemExit(f"expected two Fireworks escalations, got {len(FIREWORKS_CALLS)}")
+        if any(call["model"] not in ALLOWED_MODELS for call in FIREWORKS_CALLS):
+            raise SystemExit("called a model outside ALLOWED_MODELS")
+        if len(LOCAL_CALLS) != 9:
+            raise SystemExit(f"expected nine local samples, got {len(LOCAL_CALLS)}")
 
-    print("SUCCESS: local-only Track 1 contract test passed with zero Fireworks calls.")
+    print("SUCCESS: hybrid Track 1 contract and routing test passed.")
 
 
 if __name__ == "__main__":
