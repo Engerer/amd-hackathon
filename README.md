@@ -1,72 +1,52 @@
-# AMD Developer Hackathon - Track 1 Agent
+# AMD Developer Hackathon - Track 1 Local Qwen Experiment
 
-This repository contains a Track 1 container entry for the AMD Developer Hackathon.
-It reads `/input/tasks.json`, sends every inference request through the Fireworks
-base URL supplied by the judging harness, and writes `/output/results.json`.
+This branch packages Qwen3.5-2B Q4_K_M and the CPU-only llama.cpp runtime directly in the Docker image. It combines deterministic arithmetic with local Qwen inference, reads `/input/tasks.json`, and writes `/output/results.json` without making Fireworks or other external inference calls.
 
-## Track 1 Compliance
+## Track 1 contract
 
 - Reads tasks from `/input/tasks.json` on startup.
-- Writes valid JSON results to `/output/results.json` before exiting.
-- Reads `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, and `ALLOWED_MODELS` only from
-  environment variables.
-- Sends all inference through the configured `FIREWORKS_BASE_URL`.
-- Calls only model IDs present in `ALLOWED_MODELS`.
-- Does not bundle or call local models.
-- Builds a small `linux/amd64` Docker image through GitHub Actions.
+- Writes `[{"task_id": ..., "answer": "..."}]` to `/output/results.json`.
+- Preserves task IDs and input ordering.
+- Runs on `linux/amd64` with two CPU inference threads.
+- Uses no Fireworks credentials and makes zero Fireworks calls.
+- Solves supported arithmetic deterministically before invoking the model.
+- Bundles pinned model and runtime artifacts verified by SHA-256 during the image build.
 
-## Runtime Strategy
+## Local model
 
-- Uses zero-token regex routing with code-snippet detection for the 8 Track 1 categories.
-- Prefers `gemma-4-31b-it` for factual, sentiment, summarisation, and NER prompts.
-- Prefers `minimax-m3` for math and logic, sending `reasoning_effort="none"` to reduce hidden reasoning tokens.
-- Prefers `kimi-k2p7-code` for debugging and code generation.
-- Writes `/output/inference_log.json` with per-call usage when the API returns token metadata.
-- Keeps local deterministic solvers enabled by default for simple arithmetic, sentiment, code, and logic cases; set `ENABLE_LOCAL_SOLVERS=0` to force Fireworks calls during testing.
+- Model: Qwen3.5-2B instruction-tuned model
+- Quantization: Q4_K_M GGUF, approximately 1.4 GB
+- Runtime: llama.cpp `b9952`, CPU-only
+- Context: 4096 tokens
+- Server slots: 1
+- CPU threads: 2
 
-## Local Contract Test
+The image intentionally excludes the vision projector because Track 1 inputs are text tasks.
 
-Install dependencies and run the mock Fireworks harness:
+## Contract test
 
 ```bash
-pip install -r requirements.txt
 python test_agent.py
 ```
 
-The test writes sample tasks, starts a local mock Fireworks API, runs `main.py`,
-and verifies that every task produced a non-empty answer through an allowed model,
-with the expected category-specific routing.
+This test uses a local mock model server to verify input/output handling, category routing, reasoning-tag removal, and that no Fireworks environment variables are needed. It does not measure model accuracy.
 
-## Build Locally
+## Constrained Docker test
 
 ```bash
-docker buildx build --platform linux/amd64 -t amd-track1-agent .
-```
-
-## Run Locally
-
-```bash
-docker run --rm \
-  -v /absolute/path/to/input:/input \
+docker build --platform linux/amd64 -t amd-track1-local-qwen .
+docker run --rm --memory=4g --cpus=2 \
+  -v /absolute/path/to/input:/input:ro \
   -v /absolute/path/to/output:/output \
-  -e FIREWORKS_API_KEY="provided-by-harness" \
-  -e FIREWORKS_BASE_URL="https://api.fireworks.ai/inference/v1" \
-  -e ALLOWED_MODELS="model-a,model-b" \
-  amd-track1-agent
+  amd-track1-local-qwen
 ```
 
-## Publish
+## Published image
 
-The included GitHub Actions workflow publishes a `linux/amd64` image to GHCR on
-push to `main` or manual workflow dispatch:
+GitHub Actions publishes the experiment as:
 
 ```text
-ghcr.io/engerer/amd-hackathon:latest
+ghcr.io/engerer/amd-hackathon:t1-local-qwen-v1
 ```
 
-Before submitting, confirm the GHCR package is public and pullable:
-
-```bash
-docker pull ghcr.io/engerer/amd-hackathon:latest
-docker inspect ghcr.io/engerer/amd-hackathon:latest
-```
+It also publishes an immutable `t1-<full-commit-sha>` tag. Historical experiment tags are not overwritten.

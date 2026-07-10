@@ -23,8 +23,6 @@ jobs:
 
       - name: Run Track 1 contract test
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
           python test_agent.py
 
       - name: Set up Docker Buildx
@@ -53,14 +51,5 @@ jobs:
           tags: |
             ${{ steps.image.outputs.image_name }}:latest
             ${{ steps.image.outputs.image_name }}:amd64
-            ${{ steps.image.outputs.image_name }}:t1-fixed
-            ${{ steps.image.outputs.image_name }}:t1-direct
-            ${{ steps.image.outputs.image_name }}:t1-response
-            ${{ steps.image.outputs.image_name }}:t1-strict-response
-            ${{ steps.image.outputs.image_name }}:t1-stable-baseline
-            ${{ steps.image.outputs.image_name }}:t1-accuracy-v2
-            ${{ steps.image.outputs.image_name }}:t1-accuracy-v3
-            ${{ steps.image.outputs.image_name }}:t1-accuracy-v3-safe
-            ${{ steps.image.outputs.image_name }}:t1-accuracy-v4
-            ${{ steps.image.outputs.image_name }}:t1-80-v1
+            ${{ steps.image.outputs.image_name }}:t1-local-qwen-v1
             ${{ steps.image.outputs.image_name }}:t1-${{ github.sha }}

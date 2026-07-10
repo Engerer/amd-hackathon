@@ -1,34 +1,34 @@
 [
   {
-    "task_id": "t_factual",
-    "prompt": "What is the capital of France?"
+    "task_id": "practice-01",
+    "prompt": "What is the capital of Australia, and what body of water is it near?"
   },
   {
-    "task_id": "t_math",
-    "prompt": "Calculate the sum of 15 and 27."
+    "task_id": "practice-02",
+    "prompt": "A store has 240 items. It sells 15% on Monday and 60 more on Tuesday. How many items remain?"
   },
   {
-    "task_id": "t_sentiment",
-    "prompt": "Classify the sentiment: I love this new product!"
+    "task_id": "practice-03",
+    "prompt": "Classify the sentiment of this review and briefly justify the classification: The battery life is great, but the screen scratches too easily."
   },
   {
-    "task_id": "t_summary",
-    "prompt": "Summarize this: The quick brown fox jumps over the lazy dog."
+    "task_id": "practice-04",
+    "prompt": "Summarize the following in exactly one sentence: Open standards let independently developed systems exchange data through shared interfaces, reducing integration work and vendor lock-in."
   },
   {
-    "task_id": "t_ner",
-    "prompt": "Extract person entities: John Doe went to Paris."
+    "task_id": "practice-05",
+    "prompt": "Extract all named entities and their types from: Maria Sanchez joined Fireworks AI in Berlin last March."
   },
   {
-    "task_id": "t_debug",
-    "prompt": "Fix the code snippet with a syntax error."
+    "task_id": "practice-06",
+    "prompt": "This function should return the maximum value in a list but has a bug. Identify the bug and provide corrected Python code:\n\ndef get_max(nums):\n    return nums[0]"
   },
   {
-    "task_id": "t_logic",
-    "prompt": "Solve this logic puzzle with constraints."
+    "task_id": "practice-07",
+    "prompt": "Three friends, Sam, Jo, and Lee, each own a different pet: cat, dog, or bird. Sam does not own the bird. Jo owns the dog. Who owns the cat?"
   },
   {
-    "task_id": "t_codegen",
-    "prompt": "Write a function to add two numbers."
+    "task_id": "practice-08",
+    "prompt": "Write a Python function that returns the second-largest distinct number in a list, handling duplicates correctly and raising ValueError when fewer than two distinct values exist."
   }
 ]
